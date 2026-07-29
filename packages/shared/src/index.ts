@@ -138,6 +138,16 @@ export interface ProviderConfig {
   placeholder: string;
   /** Model ID used for agents.defaults.model in openclaw.json */
   defaultModel: string;
+  /**
+   * OpenClaw agent runtime that serves this provider's models, written as
+   * `agents.defaults.models[<id>].agentRuntime`. Set it for subscriptions whose
+   * models come from a runtime and its linked account rather than from a
+   * provider API: enabling such a plugin takes the model out of the built-in
+   * catalog, and without this OpenClaw looks it up in
+   * `models.providers[...].models[]`, finds nothing, and fails every agent turn
+   * with "Unknown model".
+   */
+  agentRuntime?: string;
   /** Available models the user can choose from */
   models?: ModelOption[];
   /** Whether this provider supports setup tokens (e.g. `claude setup-token`) */
@@ -207,7 +217,21 @@ export const PROVIDERS: ProviderConfig[] = [
       { id: 'claw/claude-haiku-4', label: 'Claude Haiku 4' },
     ],
   },
-  { id: 'openai-codex', label: 'OpenAI Codex', envVar: '', placeholder: '', defaultModel: 'openai-codex/gpt-5.5', supportsOAuth: true, oauthInstructions: 'Run `codex` and sign in with your ChatGPT account, then run `cat ~/.codex/auth.json` and paste the JSON here.' },
+  // Codex subscription is served under OpenClaw's canonical `openai` namespace
+  // (model ref `openai/gpt-5.5`); the auth-profile provider is remapped to
+  // `openai` in writeAuthProfiles(). The `openai-codex` id stays as the
+  // platform-level provider so ChatGPT/Codex OAuth keys are tracked separately
+  // from OpenAI API keys in the DB/UI and org primary-provider pin.
+  // Codex models are served by the bundled `codex` agent runtime off the linked
+  // ChatGPT account, not by the OpenAI provider API — hence agentRuntime. They
+  // still use `openai/*` refs because OpenClaw merges Codex into that namespace.
+  //
+  // Codex serves 5.6 only as the sol/terra/luna variants — plain `gpt-5.6` is an
+  // OpenAI-API-provider model and the runtime rejects it, which is why it fails
+  // at run time despite listing fine. `openclaw models list` reports the provider
+  // catalog, not what the runtime accepts, so it is no help here; the slugs the
+  // runtime knows come from the Codex CLI it bundles.
+  { id: 'openai-codex', label: 'OpenAI Codex', envVar: '', placeholder: '', defaultModel: 'openai/gpt-5.6-terra', agentRuntime: 'codex', models: [{ id: 'openai/gpt-5.6-terra', label: 'GPT-5.6 Terra' }, { id: 'openai/gpt-5.6-sol', label: 'GPT-5.6 Sol' }, { id: 'openai/gpt-5.6-luna', label: 'GPT-5.6 Luna' }, { id: 'openai/gpt-5.5', label: 'GPT-5.5' }], supportsOAuth: true, oauthInstructions: 'Run `codex` and sign in with your ChatGPT account, then run `cat ~/.codex/auth.json` and paste the JSON here.' },
   { id: 'openrouter', label: 'OpenRouter', envVar: 'OPENROUTER_API_KEY', placeholder: 'sk-or-...', defaultModel: 'openrouter/anthropic/claude-sonnet-4.5' },
 ];
 
