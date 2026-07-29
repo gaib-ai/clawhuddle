@@ -5,12 +5,22 @@ import { authPlugin } from '../middleware/auth.js';
 import { deleteOrgGateways } from '../services/gateway.js';
 import { purgeOrgFromDb } from './orgs.js';
 
+// SUPER_ADMIN_EMAIL accepts a comma-separated list of emails
+export function isSuperAdminEmail(email: string | undefined): boolean {
+  if (!email) return false;
+  const admins = (process.env.SUPER_ADMIN_EMAIL || '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+  return admins.includes(email.toLowerCase());
+}
+
 export async function superAdminRoutes(app: FastifyInstance) {
   await app.register(authPlugin);
 
   // Guard: every route in this scope requires super admin
   app.addHook('onRequest', async (request, reply) => {
-    if (request.currentUser?.email !== process.env.SUPER_ADMIN_EMAIL) {
+    if (!isSuperAdminEmail(request.currentUser?.email)) {
       return reply.status(403).send({ error: 'forbidden', message: 'Super admin only' });
     }
   });
