@@ -22,7 +22,8 @@ const CHANNEL_PLUGINS = [
 export interface ChannelTokens {
   telegram?: string;
   discord?: string;
-  slack?: string;
+  /** Slack needs two tokens: botToken (xoxb-…) and appToken (xapp-…) for Socket Mode / DMs. */
+  slack?: { botToken: string; appToken?: string };
 }
 
 export interface OpenClawConfig {
@@ -75,7 +76,18 @@ export interface OpenClawConfig {
       models: Record<string, Record<string, never>>;
     };
   };
-  channels?: Record<string, { enabled: boolean; botToken: string; dmPolicy?: string; allowFrom?: string[] }>;
+  channels?: Record<string, {
+    enabled: boolean;
+    botToken: string;
+    mode?: string;
+    appToken?: string;
+    dmPolicy?: string;
+    allowFrom?: string[];
+    groupPolicy?: string;
+    allowBots?: boolean;
+    streaming?: { mode: string };
+    dm?: { enabled: boolean; policy?: string };
+  }>;
   plugins: {
     entries: Record<string, { enabled: boolean }>;
   };
@@ -230,8 +242,20 @@ export function generateOpenClawConfig(options: {
     if (ct.discord) {
       channelsCfg.discord = { enabled: true, botToken: ct.discord };
     }
-    if (ct.slack) {
-      channelsCfg.slack = { enabled: true, botToken: ct.slack };
+    if (ct.slack?.botToken) {
+      // Slack DMs require Socket Mode (botToken + appToken) and dm.enabled.
+      channelsCfg.slack = {
+        enabled: true,
+        mode: 'socket',
+        botToken: ct.slack.botToken,
+        ...(ct.slack.appToken ? { appToken: ct.slack.appToken } : {}),
+        groupPolicy: 'open',
+        allowBots: true,
+        streaming: { mode: 'off' },
+        dmPolicy: 'open',
+        dm: { enabled: true, policy: 'open' },
+        allowFrom: ['*'],
+      };
     }
     if (Object.keys(channelsCfg).length > 0) {
       config.channels = channelsCfg;

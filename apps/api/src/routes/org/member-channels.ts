@@ -27,11 +27,11 @@ export async function orgMemberChannelRoutes(app: FastifyInstance) {
   });
 
   // Set/update channel token
-  app.put<{ Params: { orgId: string; channel: string }; Body: { bot_token: string } }>(
+  app.put<{ Params: { orgId: string; channel: string }; Body: { bot_token: string; app_token?: string } }>(
     '/api/orgs/:orgId/me/channels/:channel',
     async (request, reply) => {
       const { channel } = request.params;
-      const { bot_token } = request.body;
+      const { bot_token, app_token } = request.body;
       const orgId = request.orgId!;
       const memberId = request.orgMember!.id;
 
@@ -44,12 +44,22 @@ export async function orgMemberChannelRoutes(app: FastifyInstance) {
         return reply.status(400).send({ error: 'validation', message: `Invalid channel: ${channel}` });
       }
 
+      // Slack DMs require Socket Mode, which needs an app-level token (xapp-…) too.
+      if (channel === 'slack' && (!app_token || !app_token.trim())) {
+        return reply.status(400).send({
+          error: 'validation',
+          message: 'Slack requires app_token (xapp-…) for Socket Mode / DMs',
+        });
+      }
+
+      const appToken = channel === 'slack' ? app_token!.trim() : null;
+
       const db = getDb();
       db.prepare(
-        `INSERT INTO member_channels (member_id, channel, bot_token, updated_at)
-         VALUES (?, ?, ?, datetime('now'))
-         ON CONFLICT(member_id, channel) DO UPDATE SET bot_token = ?, updated_at = datetime('now')`
-      ).run(memberId, channel, bot_token.trim(), bot_token.trim());
+        `INSERT INTO member_channels (member_id, channel, bot_token, app_token, updated_at)
+         VALUES (?, ?, ?, ?, datetime('now'))
+         ON CONFLICT(member_id, channel) DO UPDATE SET bot_token = ?, app_token = ?, updated_at = datetime('now')`
+      ).run(memberId, channel, bot_token.trim(), appToken, bot_token.trim(), appToken);
 
       // Auto-redeploy if gateway is running
       const member = request.orgMember!;
