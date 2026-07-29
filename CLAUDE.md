@@ -50,6 +50,17 @@ docker compose --profile proxy up -d --build
 
 Config: `data/claw-proxy/config.json` (bearerToken + accounts with oauthTokens from `claude setup-token`).
 
+## Token Kiosk Integration
+
+Token Kiosk (internal OpenRouter-style gateway at `https://agent-router.gaib.ai/v1`, docs at `https://token-kiosk.gaib.ai/docs`) follows the same custom-provider pattern as claw-proxy:
+
+1. Admin adds an `sk-...` key via UI under "Token Kiosk" provider
+2. `generateOpenClawConfig()` writes a `models.providers.tokenkiosk` section into `openclaw.json` (baseUrl default `https://agent-router.gaib.ai/v1`, override via `TOKEN_KIOSK_URL` env var)
+3. Model IDs use `tokenkiosk/` prefix plus the kiosk's own `<provider>/<model>` id (e.g. `tokenkiosk/azure/gpt-5.5`, `tokenkiosk/bedrock/kimi-k2.5`) — the kiosk routes on its prefix
+4. Key goes into `openclaw.json` directly — NOT `auth-profiles.json`
+
+Curated models: Azure GPT-5.5 / GPT-5.6 Sol, AWS Bedrock Kimi K2.5 / K2 Thinking. The kiosk's full catalog is public at `GET /v1/models` (no auth) if more are wanted.
+
 ## Provider System
 
 Providers are defined in `packages/shared/src/index.ts` as `PROVIDERS` array. Each has:
@@ -57,7 +68,7 @@ Providers are defined in `packages/shared/src/index.ts` as `PROVIDERS` array. Ea
 - `models[]` — available models (with optional `proxyOnly` flag)
 - Optional: `supportsSetupToken`, `supportsOAuth`
 
-API keys are stored in `api_keys` table (org-scoped), written to `auth-profiles.json` for standard providers, or embedded in `openclaw.json` for custom providers (claw-proxy).
+API keys are stored in `api_keys` table (org-scoped), written to `auth-profiles.json` for standard providers, or embedded in `openclaw.json` for custom providers (claw-proxy, token-kiosk).
 
 ## Config Generation
 
@@ -65,7 +76,7 @@ API keys are stored in `api_keys` table (org-scoped), written to `auth-profiles.
 - `generateOpenClawConfig()` — creates full `openclaw.json` from options
 - `mergeOpenClawConfig()` — updates platform-managed fields while preserving user customizations
 
-Platform-managed fields: `meta`, `gateway.*`, `models.providers.claw`, `agents.defaults`, `channels`, `plugins`.
+Platform-managed fields: `meta`, `gateway.*`, `models.providers.*` (custom providers), `agents.defaults`, `channels`, `plugins`.
 
 ## Build & Run
 

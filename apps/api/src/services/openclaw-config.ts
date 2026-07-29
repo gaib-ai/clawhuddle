@@ -113,6 +113,8 @@ export function generateOpenClawConfig(options: {
   useHostHeaderFallback?: boolean;
   /** Claw-proxy configuration (custom provider for Claude Max subscriptions) */
   clawProxy?: { baseUrl: string; apiKey: string };
+  /** Token Kiosk configuration (custom provider; OpenAI-compatible gateway) */
+  tokenKiosk?: { baseUrl: string; apiKey: string };
   /**
    * Provider id pinned by the org as the primary model. If set AND the user has a key
    * for it, that provider becomes agents.defaults.model.primary; otherwise falls back
@@ -182,24 +184,42 @@ export function generateOpenClawConfig(options: {
     },
   };
 
-  // Register claw-proxy as a custom OpenClaw provider
+  // Register custom OpenClaw providers (claw-proxy, Token Kiosk)
+  const customProviders: NonNullable<OpenClawConfig['models']>['providers'] = {};
   if (options.clawProxy) {
-    config.models = {
-      providers: {
-        claw: {
-          baseUrl: options.clawProxy.baseUrl,
-          apiKey: options.clawProxy.apiKey,
-          api: 'openai-completions',
-          models: [
-            { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', reasoning: true, input: ['text', 'image'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000000, maxTokens: 32000 },
-            { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', reasoning: true, input: ['text', 'image'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000000, maxTokens: 32000 },
-            { id: 'claude-sonnet-4', name: 'Claude Sonnet 4', reasoning: true, input: ['text', 'image'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 16000 },
-            { id: 'claude-opus-4', name: 'Claude Opus 4', reasoning: true, input: ['text', 'image'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 32000 },
-            { id: 'claude-haiku-4', name: 'Claude Haiku 4', input: ['text', 'image'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 16000 },
-          ],
-        },
-      },
+    customProviders.claw = {
+      baseUrl: options.clawProxy.baseUrl,
+      apiKey: options.clawProxy.apiKey,
+      api: 'openai-completions',
+      models: [
+        { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', reasoning: true, input: ['text', 'image'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000000, maxTokens: 32000 },
+        { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', reasoning: true, input: ['text', 'image'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000000, maxTokens: 32000 },
+        { id: 'claude-sonnet-4', name: 'Claude Sonnet 4', reasoning: true, input: ['text', 'image'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 16000 },
+        { id: 'claude-opus-4', name: 'Claude Opus 4', reasoning: true, input: ['text', 'image'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 32000 },
+        { id: 'claude-haiku-4', name: 'Claude Haiku 4', input: ['text', 'image'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 16000 },
+      ],
     };
+  }
+  if (options.tokenKiosk) {
+    // Model ids keep the kiosk's own <provider>/<model> prefix — the gateway
+    // routes on it, so OpenClaw refs look like tokenkiosk/azure/gpt-5.5.
+    customProviders.tokenkiosk = {
+      baseUrl: options.tokenKiosk.baseUrl,
+      apiKey: options.tokenKiosk.apiKey,
+      api: 'openai-completions',
+      models: [
+        { id: 'azure/gpt-5.5', name: 'Azure GPT-5.5', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 30, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1050000, maxTokens: 32000 },
+        { id: 'azure/gpt-5.6-sol', name: 'Azure GPT-5.6 Sol', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 30, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1050000, maxTokens: 32000 },
+        { id: 'bedrock/kimi-k2.5', name: 'AWS Bedrock Kimi K2.5', input: ['text'], cost: { input: 0.72, output: 3.6, cacheRead: 0, cacheWrite: 0 }, contextWindow: 256000, maxTokens: 16000 },
+        { id: 'bedrock/kimi-k2-thinking', name: 'AWS Bedrock Kimi K2 Thinking', reasoning: true, input: ['text'], cost: { input: 0.73, output: 3.03, cacheRead: 0, cacheWrite: 0 }, contextWindow: 256000, maxTokens: 16000 },
+        { id: 'bedrock/claude-opus-4-7', name: 'AWS Bedrock Claude Opus 4.7', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 25, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 32000 },
+        { id: 'bedrock/claude-opus-4-6', name: 'AWS Bedrock Claude Opus 4.6', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 25, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 32000 },
+        { id: 'bedrock/claude-opus-4-5-20251101', name: 'AWS Bedrock Claude Opus 4.5', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 25, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 32000 },
+      ],
+    };
+  }
+  if (Object.keys(customProviders).length > 0) {
+    config.models = { providers: customProviders };
   }
 
   // Default model selection:
@@ -301,7 +321,7 @@ export function mergeOpenClawConfig(
   gw.controlUi = generated.gateway.controlUi;
   gw.trustedProxies = generated.gateway.trustedProxies;
 
-  // Platform-managed: models.providers.claw (claw-proxy custom provider)
+  // Platform-managed: models.providers (custom providers: claw-proxy, Token Kiosk)
   if (generated.models) {
     merged.models = generated.models;
   } else {

@@ -193,6 +193,19 @@ export const PROVIDERS: ProviderConfig[] = [
     ],
   },
   { id: 'openai-codex', label: 'OpenAI Codex', envVar: '', placeholder: '', defaultModel: 'openai-codex/gpt-5.5', supportsOAuth: true, oauthInstructions: 'Run `codex` and sign in with your ChatGPT account, then run `cat ~/.codex/auth.json` and paste the JSON here.' },
+  {
+    id: 'token-kiosk', label: 'Token Kiosk', envVar: '', placeholder: 'sk-...',
+    defaultModel: 'tokenkiosk/azure/gpt-5.5',
+    models: [
+      { id: 'tokenkiosk/azure/gpt-5.5', label: 'Azure GPT-5.5' },
+      { id: 'tokenkiosk/azure/gpt-5.6-sol', label: 'Azure GPT-5.6 Sol' },
+      { id: 'tokenkiosk/bedrock/kimi-k2.5', label: 'AWS Bedrock Kimi K2.5' },
+      { id: 'tokenkiosk/bedrock/kimi-k2-thinking', label: 'AWS Bedrock Kimi K2 Thinking' },
+      { id: 'tokenkiosk/bedrock/claude-opus-4-7', label: 'AWS Bedrock Claude Opus 4.7' },
+      { id: 'tokenkiosk/bedrock/claude-opus-4-6', label: 'AWS Bedrock Claude Opus 4.6' },
+      { id: 'tokenkiosk/bedrock/claude-opus-4-5-20251101', label: 'AWS Bedrock Claude Opus 4.5' },
+    ],
+  },
   { id: 'openrouter', label: 'OpenRouter', envVar: 'OPENROUTER_API_KEY', placeholder: 'sk-or-...', defaultModel: 'openrouter/anthropic/claude-sonnet-4.5' },
   { id: 'google', label: 'Google Gemini', envVar: 'GEMINI_API_KEY', placeholder: 'AIza...', defaultModel: 'google/gemini-3.1-pro-preview' },
 ];
