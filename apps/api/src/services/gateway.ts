@@ -121,13 +121,14 @@ function getMemberSkills(orgId: string, userId: string): Skill[] {
 function getMemberChannelTokens(memberId: string): ChannelTokens {
   const db = getDb();
   const rows = db
-    .prepare("SELECT channel, bot_token FROM member_channels WHERE member_id = ?")
-    .all(memberId) as { channel: string; bot_token: string }[];
+    .prepare("SELECT channel, bot_token, app_token FROM member_channels WHERE member_id = ?")
+    .all(memberId) as { channel: string; bot_token: string; app_token: string | null }[];
   const tokens: ChannelTokens = {};
   for (const row of rows) {
     if (row.channel === "telegram") tokens.telegram = row.bot_token;
     else if (row.channel === "discord") tokens.discord = row.bot_token;
-    else if (row.channel === "slack") tokens.slack = row.bot_token;
+    else if (row.channel === "slack")
+      tokens.slack = { botToken: row.bot_token, appToken: row.app_token ?? undefined };
   }
   return tokens;
 }
