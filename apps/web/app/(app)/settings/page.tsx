@@ -58,7 +58,7 @@ export default function SettingsPage() {
   };
 
   return (
-    <div className="flex-1 p-8 max-w-3xl mx-auto w-full">
+    <div className="flex-1 overflow-y-auto p-8 max-w-3xl mx-auto w-full">
       <h1 className="text-lg font-semibold mb-6" style={{ color: 'var(--text-primary)' }}>
         Settings
       </h1>

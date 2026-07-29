@@ -88,6 +88,16 @@ body {
   background: var(--text-tertiary);
 }
 
+/* Scrollable but with no visible scrollbar */
+.scrollbar-hide {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
 /* ── Focus ring ── */
 *:focus-visible {
   outline: 2px solid var(--border-focus);

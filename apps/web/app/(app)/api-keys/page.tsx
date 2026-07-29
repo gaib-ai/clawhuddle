@@ -38,7 +38,7 @@ export default function MyApiKeysPage() {
 
   if (loading || !ready) {
     return (
-      <div className="p-8 max-w-3xl mx-auto w-full">
+      <div className="flex-1 overflow-y-auto scrollbar-hide p-8 max-w-3xl mx-auto w-full">
         <h1 className="text-xl font-semibold tracking-tight mb-6" style={{ color: 'var(--text-primary)' }}>
           My API Keys
         </h1>
@@ -48,7 +48,7 @@ export default function MyApiKeysPage() {
   }
 
   return (
-    <div className="p-8 max-w-3xl mx-auto w-full">
+    <div className="flex-1 overflow-y-auto scrollbar-hide p-8 max-w-3xl mx-auto w-full">
       <h1 className="text-xl font-semibold tracking-tight mb-2" style={{ color: 'var(--text-primary)' }}>
         My API Keys
       </h1>
