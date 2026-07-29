@@ -123,6 +123,24 @@ export async function orgGatewayRoutes(app: FastifyInstance) {
     }
   );
 
+  // Member self-deploy (any org member can deploy/restart their own gateway):
+  // first deploy provisions; afterwards redeploys (also covers restart from stopped)
+  app.post<{ Params: { orgId: string } }>(
+    '/api/orgs/:orgId/gateways/me/deploy',
+    async (request, reply) => {
+      const { orgId } = request.params;
+      const member = request.orgMember!;
+      try {
+        const result = member.gateway_token
+          ? await redeployGateway(orgId, member.id)
+          : await provisionGateway(orgId, member.id);
+        return reply.status(member.gateway_token ? 200 : 201).send({ data: result });
+      } catch (err: any) {
+        return reply.status(400).send({ error: 'gateway_error', message: err.message });
+      }
+    }
+  );
+
   // Get gateway status
   app.get<{ Params: { orgId: string; memberId: string } }>(
     '/api/orgs/:orgId/gateways/members/:memberId/status',

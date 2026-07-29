@@ -159,6 +159,8 @@ function DashboardView() {
   const [skillStats, setSkillStats] = useState<{ enabled: number; total: number } | null>(null);
   const [loading, setLoading] = useState(true);
   const [stopping, setStopping] = useState(false);
+  const [deploying, setDeploying] = useState(false);
+  const [deployError, setDeployError] = useState('');
 
   const fetchData = useCallback(async () => {
     if (!orgFetch) return;
@@ -214,6 +216,20 @@ function DashboardView() {
       // ignore
     } finally {
       setStopping(false);
+    }
+  };
+
+  const deployGateway = async () => {
+    if (!orgFetch) return;
+    setDeploying(true);
+    setDeployError('');
+    try {
+      await orgFetch('/gateways/me/deploy', { method: 'POST' });
+      await fetchData();
+    } catch (err: any) {
+      setDeployError(err.message || 'Deploy failed');
+    } finally {
+      setDeploying(false);
     }
   };
 
@@ -300,11 +316,28 @@ function DashboardView() {
               </button>
             </div>
           ) : (
-            <p className="text-xs py-2" style={{ color: 'var(--text-tertiary)' }}>
-              {gwStatus === 'stopped'
-                ? 'Your assistant is stopped. Contact your admin to restart it.'
-                : 'Your assistant is not yet deployed. Contact your admin to get started.'}
-            </p>
+            <div className="py-2 space-y-2">
+              <p className="text-xs" style={{ color: 'var(--text-tertiary)' }}>
+                {gwStatus === 'stopped'
+                  ? 'Your assistant is stopped.'
+                  : 'Your assistant is not yet deployed.'}
+              </p>
+              <button
+                onClick={deployGateway}
+                disabled={deploying}
+                className="w-full py-2.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+                style={{ background: 'var(--accent)', color: 'var(--text-inverse)' }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--accent-hover)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--accent)'; }}
+              >
+                {deploying
+                  ? 'Deploying...'
+                  : gwStatus === 'stopped' ? 'Restart My Assistant' : 'Deploy My Assistant'}
+              </button>
+              {deployError && (
+                <p className="text-xs" style={{ color: 'var(--red)' }}>{deployError}</p>
+              )}
+            </div>
           )}
         </div>
 
