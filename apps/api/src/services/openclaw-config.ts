@@ -22,7 +22,8 @@ const CHANNEL_PLUGINS = [
 export interface ChannelTokens {
   telegram?: string;
   discord?: string;
-  slack?: string;
+  /** Slack needs two tokens: botToken (xoxb-…) and appToken (xapp-…) for Socket Mode / DMs. */
+  slack?: { botToken: string; appToken?: string };
 }
 
 export interface OpenClawConfig {
@@ -73,9 +74,26 @@ export interface OpenClawConfig {
     defaults: {
       model: { primary: string; fallbacks?: string[] };
       models: Record<string, Record<string, never>>;
+      thinkingDefault?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'adaptive';
     };
+    list?: Array<{
+      id: string;
+      default?: boolean;
+      reasoningDefault?: 'on' | 'off' | 'stream';
+    }>;
   };
-  channels?: Record<string, { enabled: boolean; botToken: string; dmPolicy?: string; allowFrom?: string[] }>;
+  channels?: Record<string, {
+    enabled: boolean;
+    botToken: string;
+    mode?: string;
+    appToken?: string;
+    dmPolicy?: string;
+    allowFrom?: string[];
+    groupPolicy?: string;
+    allowBots?: boolean;
+    streaming?: { mode: string };
+    dm?: { enabled: boolean; policy?: string };
+  }>;
   plugins: {
     entries: Record<string, { enabled: boolean }>;
   };
@@ -204,41 +222,42 @@ export function generateOpenClawConfig(options: {
     config.models = { providers: customProviders };
   }
 
-  // Set default model based on active providers so OpenClaw doesn't
-  // fall back to Anthropic when only another provider's key exists.
-  // If the org pinned a primary provider AND the user has a key for it,
-  // hoist that provider to the front so its model becomes primary.
-  let activeProviders = (options.activeProviderIds ?? [])
+  // Default model selection:
+  //  - If the org pinned a primary provider (Admin → API Keys) AND the member
+  //    has a key for it, that provider's model (honoring the per-provider
+  //    model override) becomes primary; other active providers are fallbacks.
+  //  - Otherwise the primary defaults to google/gemini-3.1-pro-preview —
+  //    NOT the first active provider — so gateways behave consistently no
+  //    matter which keys happen to exist.
+  const DEFAULT_PRIMARY = 'google/gemini-3.1-pro-preview';
+  const overrides = options.modelOverrides ?? {};
+  const resolveModel = (p: (typeof PROVIDERS)[number]) => overrides[p.id] || p.defaultModel;
+
+  const activeProviders = (options.activeProviderIds ?? [])
     .map((id) => PROVIDERS.find((p) => p.id === id))
     .filter(Boolean) as typeof PROVIDERS;
 
-  if (options.primaryProviderId) {
-    const pinnedIdx = activeProviders.findIndex((p) => p.id === options.primaryProviderId);
-    if (pinnedIdx > 0) {
-      const pinned = activeProviders[pinnedIdx];
-      activeProviders = [pinned, ...activeProviders.slice(0, pinnedIdx), ...activeProviders.slice(pinnedIdx + 1)];
-    }
-  }
+  const pinned = options.primaryProviderId
+    ? activeProviders.find((p) => p.id === options.primaryProviderId)
+    : undefined;
 
-  if (activeProviders.length > 0) {
-    const overrides = options.modelOverrides ?? {};
-    const models: Record<string, Record<string, never>> = {};
-    // Use user-selected model if set, otherwise provider default
-    const resolveModel = (p: (typeof PROVIDERS)[number]) => overrides[p.id] || p.defaultModel;
+  const primary = pinned ? resolveModel(pinned) : DEFAULT_PRIMARY;
+  const fallbacks = activeProviders
+    .filter((p) => p !== pinned)
+    .map(resolveModel)
+    .filter((m) => m !== primary);
 
-    for (const p of activeProviders) {
-      models[resolveModel(p)] = {};
-    }
-    const primary = resolveModel(activeProviders[0]);
-    const fallbacks = activeProviders.slice(1).map((p) => resolveModel(p));
+  const models: Record<string, Record<string, never>> = { [primary]: {} };
+  for (const m of fallbacks) models[m] = {};
 
-    config.agents = {
-      defaults: {
-        model: { primary, ...(fallbacks.length > 0 ? { fallbacks } : {}) },
-        models,
-      },
-    };
-  }
+  config.agents = {
+    defaults: {
+      model: { primary, ...(fallbacks.length > 0 ? { fallbacks } : {}) },
+      models,
+      thinkingDefault: 'medium',
+    },
+    list: [{ id: 'main', default: true, reasoningDefault: 'off' }],
+  };
 
   // Configure channel tokens (e.g. Telegram bot token)
   const ct = options.channelTokens;
@@ -250,8 +269,20 @@ export function generateOpenClawConfig(options: {
     if (ct.discord) {
       channelsCfg.discord = { enabled: true, botToken: ct.discord };
     }
-    if (ct.slack) {
-      channelsCfg.slack = { enabled: true, botToken: ct.slack };
+    if (ct.slack?.botToken) {
+      // Slack DMs require Socket Mode (botToken + appToken) and dm.enabled.
+      channelsCfg.slack = {
+        enabled: true,
+        mode: 'socket',
+        botToken: ct.slack.botToken,
+        ...(ct.slack.appToken ? { appToken: ct.slack.appToken } : {}),
+        groupPolicy: 'open',
+        allowBots: true,
+        streaming: { mode: 'off' },
+        dmPolicy: 'open',
+        dm: { enabled: true, policy: 'open' },
+        allowFrom: ['*'],
+      };
     }
     if (Object.keys(channelsCfg).length > 0) {
       config.channels = channelsCfg;
