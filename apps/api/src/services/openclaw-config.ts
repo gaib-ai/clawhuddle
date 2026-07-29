@@ -194,6 +194,9 @@ export function generateOpenClawConfig(options: {
         { id: 'azure/gpt-5.6-sol', name: 'Azure GPT-5.6 Sol', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 30, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1050000, maxTokens: 32000 },
         { id: 'bedrock/kimi-k2.5', name: 'AWS Bedrock Kimi K2.5', input: ['text'], cost: { input: 0.72, output: 3.6, cacheRead: 0, cacheWrite: 0 }, contextWindow: 256000, maxTokens: 16000 },
         { id: 'bedrock/kimi-k2-thinking', name: 'AWS Bedrock Kimi K2 Thinking', reasoning: true, input: ['text'], cost: { input: 0.73, output: 3.03, cacheRead: 0, cacheWrite: 0 }, contextWindow: 256000, maxTokens: 16000 },
+        { id: 'bedrock/claude-opus-4-7', name: 'AWS Bedrock Claude Opus 4.7', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 25, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 32000 },
+        { id: 'bedrock/claude-opus-4-6', name: 'AWS Bedrock Claude Opus 4.6', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 25, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 32000 },
+        { id: 'bedrock/claude-opus-4-5-20251101', name: 'AWS Bedrock Claude Opus 4.5', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 25, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 32000 },
       ],
     };
   }
