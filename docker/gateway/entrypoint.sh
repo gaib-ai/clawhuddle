@@ -22,9 +22,19 @@ done
 # Auto-approve all pending device pairings every 5 seconds.
 # This removes the need for manual approval when users open
 # the Control UI from a new browser or device.
-# Can be removed once OpenClaw releases skipDevicePairingForTrustedProxy.
+# `approve --latest` only previews — we must list pending requests and
+# approve each by id. Can be removed once OpenClaw releases
+# skipDevicePairingForTrustedProxy.
 while true; do
-  openclaw devices approve --latest 2>/dev/null || true
+  ids=$(openclaw devices list --json 2>/dev/null | node -e '
+    let d="";
+    process.stdin.on("data", c => d += c).on("end", () => {
+      try { JSON.parse(d).pending.forEach(p => console.log(p.requestId)); } catch {}
+    });
+  ' 2>/dev/null)
+  for id in $ids; do
+    openclaw devices approve "$id" >/dev/null 2>&1 || true
+  done
   sleep 5
 done &
 

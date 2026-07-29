@@ -7,7 +7,7 @@ services:
       - "--providers.docker.network=${DOCKER_NETWORK:-clawhuddle-net}"
       - "--entrypoints.web.address=:80"
     ports:
-      - "8080:80"
+      - "80:80"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
