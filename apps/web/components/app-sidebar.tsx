@@ -51,6 +51,14 @@ const icons = {
       <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>
     </svg>
   ),
+  portForwards: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="17 1 21 5 17 9"/>
+      <path d="M3 11V9a4 4 0 0 1 4-4h14"/>
+      <polyline points="7 23 3 19 7 15"/>
+      <path d="M21 13v2a4 4 0 0 1-4 4H3"/>
+    </svg>
+  ),
   settings: (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="12" r="3"/>
@@ -177,6 +185,7 @@ export function AppSidebar() {
                   <NavItem href="/admin/invitations" icon={icons.invitations} label="Invitations" active={pathname.startsWith('/admin/invitations')} />
                   <NavItem href="/admin/skills" icon={icons.skillLibrary} label="Skill Library" active={pathname.startsWith('/admin/skills')} />
                   <NavItem href="/admin/api-keys" icon={icons.keys} label="API Keys" active={pathname.startsWith('/admin/api-keys')} />
+                  <NavItem href="/admin/port-forwards" icon={icons.portForwards} label="Port Forwards" active={pathname.startsWith('/admin/port-forwards')} />
                 </div>
               </>
             )}

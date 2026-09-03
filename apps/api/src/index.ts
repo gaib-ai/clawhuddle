@@ -13,8 +13,10 @@ import { orgGatewayRoutes } from './routes/org/gateways.js';
 import { orgUserSkillRoutes } from './routes/org/user-skills.js';
 import { orgMemberChannelRoutes } from './routes/org/member-channels.js';
 import { orgChatRoutes } from './routes/org/chat.js';
+import { orgPortForwardRoutes } from './routes/org/port-forwards.js';
 import { superAdminRoutes } from './routes/super-admin.js';
 import { getDb } from './db/index.js';
+import { syncAllPortForwards } from './services/port-forward.js';
 
 const app = Fastify({ logger: true });
 
@@ -57,7 +59,11 @@ await app.register(async function orgScopedRoutes(instance) {
   await instance.register(orgUserSkillRoutes);
   await instance.register(orgMemberChannelRoutes);
   await instance.register(orgChatRoutes);
+  await instance.register(orgPortForwardRoutes);
 });
+
+// Regenerate traefik config files for stored port forwards
+syncAllPortForwards();
 
 app.get('/api/health', async () => {
   return { status: 'ok', timestamp: new Date().toISOString() };

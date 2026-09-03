@@ -84,7 +84,7 @@ function getHostGatewayDir(orgId: string, userId: string): string {
   return path.join(getHostDataDir(), "gateways", orgId, userId);
 }
 
-function getContainerName(orgId: string, userId: string): string {
+export function getContainerName(orgId: string, userId: string): string {
   // Keep under 63 chars for Docker DNS resolution
   return `${CONTAINER_PREFIX}${orgId.slice(0, 8)}-${userId.slice(0, 8)}`;
 }

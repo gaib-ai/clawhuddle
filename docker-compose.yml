@@ -5,6 +5,8 @@ services:
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
       - "--providers.docker.network=${DOCKER_NETWORK:-clawhuddle-net}"
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--providers.file.watch=true"
       - "--entrypoints.web.address=:80"
       # Trust X-Forwarded-* from Cloudflare (and local/private nets) so the real client
       # IP reaches the gateways — OpenClaw 2026.8+ rejects proxied requests it cannot
@@ -15,6 +17,7 @@ services:
       - "80:80"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./data/traefik-dynamic:/etc/traefik/dynamic:ro
     networks:
       - clawhuddle-net
     restart: unless-stopped
