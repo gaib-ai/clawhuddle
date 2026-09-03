@@ -55,7 +55,7 @@ interface Props {
 
 export function MemberTable({ initialMembers }: Props) {
   const { data: session } = useSession();
-  const { currentOrgId } = useOrg();
+  const { currentOrgId, memberRole } = useOrg();
   const { toast } = useToast();
   const { confirm } = useConfirm();
   const userId = session?.user?.id;
@@ -143,6 +143,20 @@ export function MemberTable({ initialMembers }: Props) {
     try {
       await orgFetch(`/members/${member.id}`, { method: 'DELETE' });
       toast('Member removed', 'success');
+      await refresh();
+    } catch (err: any) {
+      toast(err.message, 'error');
+    }
+  };
+
+  const changeRole = async (member: OrgMember, role: string) => {
+    if (role === member.role) return;
+    try {
+      await orgFetch(`/members/${member.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ role }),
+      });
+      toast(`Role updated to ${role}`, 'success');
       await refresh();
     } catch (err: any) {
       toast(err.message, 'error');
@@ -420,9 +434,33 @@ export function MemberTable({ initialMembers }: Props) {
                   {member.email}
                 </td>
                 <td className="px-4 py-3">
-                  <Badge color={roleColor(member.role) as any}>
-                    {member.role}
-                  </Badge>
+                  {member.user_id !== userId &&
+                  (memberRole === 'owner' || (memberRole === 'admin' && member.role !== 'owner')) ? (
+                    <select
+                      value={member.role}
+                      onChange={(e) => changeRole(member, e.target.value)}
+                      className="px-2 py-0.5 rounded text-[11px] font-medium cursor-pointer appearance-none"
+                      style={{
+                        background:
+                          member.role === 'owner' ? 'var(--yellow-muted)' :
+                          member.role === 'admin' ? 'var(--purple-muted)' :
+                          'var(--bg-tertiary)',
+                        color:
+                          member.role === 'owner' ? 'var(--yellow)' :
+                          member.role === 'admin' ? 'var(--purple)' :
+                          'var(--text-tertiary)',
+                        border: 'none',
+                      }}
+                    >
+                      {memberRole === 'owner' && <option value="owner">owner</option>}
+                      <option value="admin">admin</option>
+                      <option value="member">member</option>
+                    </select>
+                  ) : (
+                    <Badge color={roleColor(member.role) as any}>
+                      {member.role}
+                    </Badge>
+                  )}
                 </td>
                 <td className="px-4 py-3">
                   <Badge color={member.status === 'active' ? 'green' : 'red'}>
