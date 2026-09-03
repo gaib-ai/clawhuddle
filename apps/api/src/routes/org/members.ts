@@ -4,9 +4,9 @@ import { v4 as uuid } from 'uuid';
 import crypto from 'node:crypto';
 import { requireRole } from '../../middleware/auth.js';
 import { sendInvitationEmail } from '../../services/email.js';
-import { getOrgContainerIds } from '../../services/gateway.js';
+import { getOrgContainerIds, syncAuthProfilesForUser } from '../../services/gateway.js';
 import type { InviteMemberRequest, UpdateMemberRequest } from '@clawhuddle/shared';
-import { DEFAULT_MAX_MEMBERS } from '@clawhuddle/shared';
+import { DEFAULT_MAX_MEMBERS, PROVIDER_IDS } from '@clawhuddle/shared';
 
 export async function orgMemberRoutes(app: FastifyInstance) {
   // List members
@@ -218,6 +218,44 @@ export async function orgMemberRoutes(app: FastifyInstance) {
 
       db.prepare('DELETE FROM org_members WHERE id = ?').run(memberId);
       return { data: { id: memberId, removed: true } };
+    }
+  );
+
+  // Get own primary provider (any member). Returns the personal override
+  // (null = follow org default) alongside the org default for display.
+  app.get('/api/orgs/:orgId/me/primary-provider', async (request) => {
+    const db = getDb();
+    const org = db
+      .prepare('SELECT primary_provider FROM organizations WHERE id = ?')
+      .get(request.orgId!) as { primary_provider: string | null };
+    return {
+      data: {
+        primary_provider: (request.orgMember as any).primary_provider ?? null,
+        org_primary_provider: org?.primary_provider ?? null,
+      },
+    };
+  });
+
+  // Set own primary provider (any member). null clears the override so the
+  // member follows the org default again.
+  app.put<{ Body: { primary_provider?: string | null } }>(
+    '/api/orgs/:orgId/me/primary-provider',
+    async (request, reply) => {
+      const next = request.body?.primary_provider ?? null;
+      if (next !== null && !PROVIDER_IDS.includes(next)) {
+        return reply.status(400).send({ error: 'validation', message: `Unknown provider: ${next}` });
+      }
+
+      const db = getDb();
+      db.prepare('UPDATE org_members SET primary_provider = ? WHERE id = ?')
+        .run(next, request.orgMember!.id);
+
+      // Primary provider is baked into agents.defaults in openclaw.json at
+      // config-generation time — rewrite this member's config; the change takes
+      // effect on the next gateway restart.
+      syncAuthProfilesForUser(request.orgId!, (request.orgMember as any).user_id);
+
+      return { data: { primary_provider: next } };
     }
   );
 }

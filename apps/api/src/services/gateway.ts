@@ -408,12 +408,17 @@ export function reconcileAuthProfileStore(
   }
 }
 
-function getOrgPrimaryProvider(orgId: string): string | null {
+// Member's personal primary provider wins; falls back to the org default.
+function getPrimaryProvider(orgId: string, userId: string): string | null {
   const db = getDb();
-  const row = db
+  const memberRow = db
+    .prepare('SELECT primary_provider FROM org_members WHERE org_id = ? AND user_id = ?')
+    .get(orgId, userId) as { primary_provider: string | null } | undefined;
+  if (memberRow?.primary_provider) return memberRow.primary_provider;
+  const orgRow = db
     .prepare('SELECT primary_provider FROM organizations WHERE id = ?')
     .get(orgId) as { primary_provider: string | null } | undefined;
-  return row?.primary_provider ?? null;
+  return orgRow?.primary_provider ?? null;
 }
 
 /**
@@ -461,7 +466,7 @@ function regenerateGatewayConfig(orgId: string, userId: string): boolean {
     channelTokens,
     clawProxy: clawProxyKey ? { baseUrl: clawProxyBaseUrl, apiKey: clawProxyKey } : undefined,
     tokenKiosk: tokenKioskKey ? { baseUrl: getTokenKioskBaseUrl(), apiKey: tokenKioskKey } : undefined,
-    primaryProviderId: getOrgPrimaryProvider(orgId) ?? undefined,
+    primaryProviderId: getPrimaryProvider(orgId, userId) ?? undefined,
     ...getControlUiOrigins(member.gateway_subdomain),
   };
 
@@ -610,7 +615,7 @@ export async function provisionGateway(orgId: string, memberId: string) {
     channelTokens,
     clawProxy: clawProxyKey ? { baseUrl: clawProxyBaseUrl, apiKey: clawProxyKey } : undefined,
     tokenKiosk: tokenKioskKey ? { baseUrl: getTokenKioskBaseUrl(), apiKey: tokenKioskKey } : undefined,
-    primaryProviderId: getOrgPrimaryProvider(orgId) ?? undefined,
+    primaryProviderId: getPrimaryProvider(orgId, member.user_id) ?? undefined,
     ...getControlUiOrigins(subdomain),
   });
   fs.writeFileSync(
@@ -804,7 +809,7 @@ export async function redeployGateway(orgId: string, memberId: string) {
     channelTokens,
     clawProxy: clawProxyKey ? { baseUrl: clawProxyBaseUrl, apiKey: clawProxyKey } : undefined,
     tokenKiosk: tokenKioskKey ? { baseUrl: getTokenKioskBaseUrl(), apiKey: tokenKioskKey } : undefined,
-    primaryProviderId: getOrgPrimaryProvider(orgId) ?? undefined,
+    primaryProviderId: getPrimaryProvider(orgId, member.user_id) ?? undefined,
     ...getControlUiOrigins(member.gateway_subdomain),
   };
 

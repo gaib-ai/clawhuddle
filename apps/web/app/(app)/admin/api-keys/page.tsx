@@ -81,9 +81,9 @@ export default function ApiKeysPage() {
           </span>
         </div>
         <p className="text-xs mb-3" style={{ color: 'var(--text-tertiary)' }}>
-          Pin one provider to always be the primary model on every member’s gateway. When a personal
-          override adds another provider for a member, that provider becomes a fallback instead of
-          replacing the primary. Takes effect on the next gateway restart.
+          Pin one provider to always be the primary model on every member’s gateway. Members can
+          override this for their own gateway under My API Keys — a personal pick wins over this
+          default. Takes effect on the next gateway restart.
         </p>
         <select
           value={currentPrimary}
