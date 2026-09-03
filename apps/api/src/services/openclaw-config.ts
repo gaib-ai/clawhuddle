@@ -23,6 +23,24 @@ const CHANNEL_PLUGINS = [
   'slack',
 ];
 
+// Plugins force-disabled on every gateway. Configs from older platform versions
+// enabled every channel plugin, and the merge preserves user entries — so a
+// harmful entry has to be actively overwritten, not just left out of the list.
+//
+// msteams: its bundled "feedback learnings" state migration is broken against
+// core 2026.8.x (openclaw/openclaw#124535, fixed on main only) — it throws
+// SessionStoreAgentIdRequiredError during startup migrations and the gateway
+// then refuses to report ready, even when Teams was never configured. Remove
+// once a release ships the fix (verify: gateway starts with msteams enabled).
+const FORCE_DISABLED_PLUGINS = [
+  'msteams',
+  // imessage: macOS-only channel the platform cannot configure. Since 2026.8.x
+  // the gateway auto-installs it when enabled and then hard-blocks startup on a
+  // capability-consent prompt ("requires capability consent") no one can answer
+  // in a headless container. Legacy configs enabled it.
+  'imessage',
+];
+
 /**
  * An entry in agents.defaults.models. `agentRuntime` binds the model to an
  * OpenClaw agent runtime, which then serves it from its linked account instead
@@ -142,6 +160,11 @@ export function generateOpenClawConfig(options: {
   const pluginEntries: Record<string, { enabled: boolean }> = {};
   for (const ch of channels) {
     pluginEntries[ch] = { enabled: true };
+  }
+  // Generated entries win in mergeOpenClawConfig, so this overwrites a legacy
+  // enabled:true from configs written by older platform versions.
+  for (const pluginId of FORCE_DISABLED_PLUGINS) {
+    pluginEntries[pluginId] = { enabled: false };
   }
 
   const config: OpenClawConfig = {

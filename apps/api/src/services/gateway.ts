@@ -146,14 +146,12 @@ function createTraefikLabels(
     [`traefik.http.services.${containerName}.loadbalancer.server.port`]: String(
       GATEWAY_EXTERNAL_PORT,
     ),
-    // Override proxy headers so OpenClaw sees a local connection and auto-approves device pairing
-    [`traefik.http.middlewares.${containerName}-headers.headers.customrequestheaders.X-Forwarded-For`]:
-      "127.0.0.1",
-    [`traefik.http.middlewares.${containerName}-headers.headers.customrequestheaders.X-Real-IP`]:
-      "127.0.0.1",
-    [`traefik.http.middlewares.${containerName}-headers.headers.customrequestheaders.X-Forwarded-Proto`]:
-      "",
-    // Strip Cloudflare proxy headers
+    // Forward real client attribution. OpenClaw 2026.8+ rejects proxied requests whose
+    // forwarded client IP resolves to loopback (proxy_attribution_required), so the old
+    // trick of spoofing X-Forwarded-For: 127.0.0.1 to look local no longer works —
+    // Traefik's own appended X-Forwarded-For plus gateway.trustedProxies (which includes
+    // the Cloudflare ranges) attributes the request to the real client instead.
+    // Strip Cloudflare pseudo-headers; attribution comes from X-Forwarded-For alone
     [`traefik.http.middlewares.${containerName}-headers.headers.customrequestheaders.CF-Connecting-IP`]:
       "",
     [`traefik.http.middlewares.${containerName}-headers.headers.customrequestheaders.True-Client-IP`]:
