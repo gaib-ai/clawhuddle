@@ -63,6 +63,7 @@ export interface OpenClawConfig {
         cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
         contextWindow: number;
         maxTokens: number;
+        compat?: { maxTokensField?: 'max_tokens' | 'max_completion_tokens' };
       }[];
     }>;
   };
@@ -216,18 +217,24 @@ export function generateOpenClawConfig(options: {
   if (options.tokenKiosk) {
     // Model ids keep the kiosk's own <provider>/<model> prefix — the gateway
     // routes on it, so OpenClaw refs look like tokenkiosk/azure/gpt-5.5.
+    // compat.maxTokensField: the kiosk ignores the value of the modern
+    // `max_completion_tokens` field and clamps completions to 1024 tokens,
+    // which truncates any long reply (finish_reason=length → OpenClaw drops
+    // the turn as non_deliverable_terminal_turn). Legacy `max_tokens` is
+    // honored correctly, so force it until the kiosk is fixed.
+    const kioskCompat = { maxTokensField: 'max_tokens' as const };
     customProviders.tokenkiosk = {
       baseUrl: options.tokenKiosk.baseUrl,
       apiKey: options.tokenKiosk.apiKey,
       api: 'openai-completions',
       models: [
-        { id: 'azure/gpt-5.5', name: 'Azure GPT-5.5', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 30, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1050000, maxTokens: 32000 },
-        { id: 'azure/gpt-5.6-sol', name: 'Azure GPT-5.6 Sol', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 30, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1050000, maxTokens: 32000 },
-        { id: 'bedrock/kimi-k2.5', name: 'AWS Bedrock Kimi K2.5', input: ['text'], cost: { input: 0.72, output: 3.6, cacheRead: 0, cacheWrite: 0 }, contextWindow: 256000, maxTokens: 16000 },
-        { id: 'bedrock/kimi-k2-thinking', name: 'AWS Bedrock Kimi K2 Thinking', reasoning: true, input: ['text'], cost: { input: 0.73, output: 3.03, cacheRead: 0, cacheWrite: 0 }, contextWindow: 256000, maxTokens: 16000 },
-        { id: 'bedrock/claude-opus-4-7', name: 'AWS Bedrock Claude Opus 4.7', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 25, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 32000 },
-        { id: 'bedrock/claude-opus-4-6', name: 'AWS Bedrock Claude Opus 4.6', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 25, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 32000 },
-        { id: 'bedrock/claude-opus-4-5-20251101', name: 'AWS Bedrock Claude Opus 4.5', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 25, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 32000 },
+        { id: 'azure/gpt-5.5', name: 'Azure GPT-5.5', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 30, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1050000, maxTokens: 32000, compat: kioskCompat },
+        { id: 'azure/gpt-5.6-sol', name: 'Azure GPT-5.6 Sol', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 30, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1050000, maxTokens: 32000, compat: kioskCompat },
+        { id: 'bedrock/kimi-k2.5', name: 'AWS Bedrock Kimi K2.5', input: ['text'], cost: { input: 0.72, output: 3.6, cacheRead: 0, cacheWrite: 0 }, contextWindow: 256000, maxTokens: 16000, compat: kioskCompat },
+        { id: 'bedrock/kimi-k2-thinking', name: 'AWS Bedrock Kimi K2 Thinking', reasoning: true, input: ['text'], cost: { input: 0.73, output: 3.03, cacheRead: 0, cacheWrite: 0 }, contextWindow: 256000, maxTokens: 16000, compat: kioskCompat },
+        { id: 'bedrock/claude-opus-4-7', name: 'AWS Bedrock Claude Opus 4.7', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 25, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 32000, compat: kioskCompat },
+        { id: 'bedrock/claude-opus-4-6', name: 'AWS Bedrock Claude Opus 4.6', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 25, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 32000, compat: kioskCompat },
+        { id: 'bedrock/claude-opus-4-5-20251101', name: 'AWS Bedrock Claude Opus 4.5', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 25, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 32000, compat: kioskCompat },
       ],
     };
   }
