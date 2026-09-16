@@ -188,12 +188,23 @@ function DashboardView() {
     fetchData();
   }, [fetchData]);
 
-  // Poll while deploying
+  // Poll while deploying. /members returns the stored status, which is only
+  // resynced with the container's real health by the status route — so hit
+  // that first, otherwise a gateway that has come up shows "starting..." until
+  // an admin (or the channels page) happens to poll it.
   useEffect(() => {
     if (!me || me.gateway_status !== 'deploying') return;
-    const id = setInterval(fetchData, 5000);
+    const tick = async () => {
+      try {
+        await orgFetch?.('/me/gateway/status');
+      } catch {
+        // ignore — fetchData still refreshes the stored status
+      }
+      await fetchData();
+    };
+    const id = setInterval(tick, 5000);
     return () => clearInterval(id);
-  }, [me?.gateway_status, fetchData]);
+  }, [me?.gateway_status, fetchData, orgFetch]);
 
   const openGateway = () => {
     if (!me?.gateway_token) return;
