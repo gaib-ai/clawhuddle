@@ -17,6 +17,13 @@ import { PROVIDERS } from '@clawhuddle/shared';
 //
 // Once installed, plugins are cached in the mounted state — later boots need no
 // network at all. Adding to this list re-opens that window on every gateway.
+//
+// Since 2026.8.x a non-bundled plugin also needs capability consent before it
+// may be enabled, and the gateway's own startup auto-install cannot grant it —
+// it stops with 'Plugin "discord" requires capability consent' and refuses to
+// report ready. docker/gateway/entrypoint.sh therefore pre-installs every
+// enabled-but-missing plugin with `openclaw plugins install --accept-capabilities`
+// before starting the gateway; anything added here is covered by that step.
 const CHANNEL_PLUGINS = [
   'telegram',
   'discord',
