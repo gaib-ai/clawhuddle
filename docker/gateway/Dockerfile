@@ -38,7 +38,7 @@ ENV PATH=$PATH:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin \
 # redeploy. Pair with the ClawHub skill @steipete/gog so agents know the CLI.
 RUN brew install gogcli && brew cleanup -s && rm -rf /home/linuxbrew/.cache/Homebrew
 ENV GOG_HOME=/root/.openclaw/gog
-RUN npm install -g openclaw@2026.9.4
+RUN npm install -g openclaw@2026.10.3
 # Default the Control UI language to English (see patch-control-ui.sh).
 COPY patch-control-ui.sh /patch-control-ui.sh
 RUN sh /patch-control-ui.sh && rm /patch-control-ui.sh

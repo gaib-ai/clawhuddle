@@ -56,10 +56,10 @@ Token Kiosk (internal OpenRouter-style gateway at `https://agent-router.gaib.ai/
 
 1. Admin adds an `sk-...` key via UI under "Token Kiosk" provider
 2. `generateOpenClawConfig()` writes a `models.providers.tokenkiosk` section into `openclaw.json` (baseUrl default `https://agent-router.gaib.ai/v1`, override via `TOKEN_KIOSK_URL` env var)
-3. Model IDs use `tokenkiosk/` prefix plus the kiosk's own `<provider>/<model>` id (e.g. `tokenkiosk/azure/gpt-5.5`, `tokenkiosk/bedrock/kimi-k2.5`) — the kiosk routes on its prefix
+3. Model IDs use `tokenkiosk/` prefix plus the kiosk's own id — either a `<provider>/<model>` id (e.g. `tokenkiosk/azure/gpt-5.5`, `tokenkiosk/bedrock/kimi-k2.5`; the kiosk routes on its prefix) or one of the kiosk's rolling aliases (e.g. `tokenkiosk/claude-opus-latest`)
 4. Key goes into `openclaw.json` directly — NOT `auth-profiles.json`
 
-Curated models: Azure GPT-5.5 / GPT-5.6 Sol, AWS Bedrock Kimi K2.5 / K2 Thinking. The kiosk's full catalog is public at `GET /v1/models` (no auth) if more are wanted.
+Curated models: Azure GPT-5.5 / GPT-5.6 Sol, AWS Bedrock Kimi K2.5 / K2 Thinking, Claude Opus (latest). The kiosk's full catalog is public at `GET /v1/models` (no auth) if more are wanted.
 
 ## Provider System
 

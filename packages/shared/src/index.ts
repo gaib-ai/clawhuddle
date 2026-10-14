@@ -168,7 +168,15 @@ export interface ProviderConfig {
 
 // Order matters: this is the display order of provider cards in the UI.
 export const PROVIDERS: ProviderConfig[] = [
-  { id: 'google', label: 'Google Gemini', envVar: 'GEMINI_API_KEY', placeholder: 'AIza...', defaultModel: 'google/gemini-3.1-pro-preview' },
+  {
+    id: 'google', label: 'Google Gemini', envVar: 'GEMINI_API_KEY', placeholder: 'AIza...',
+    defaultModel: 'google/gemini-4-argon',
+    models: [
+      { id: 'google/gemini-4-argon', label: 'Gemini 4 Argon' },
+      { id: 'google/gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview' },
+      { id: 'google/gemini-3-flash-preview', label: 'Gemini 3 Flash Preview' },
+    ],
+  },
   {
     id: 'token-kiosk', label: 'Token Kiosk', envVar: '', placeholder: 'sk-...',
     defaultModel: 'tokenkiosk/azure/gpt-5.5',
@@ -177,9 +185,7 @@ export const PROVIDERS: ProviderConfig[] = [
       { id: 'tokenkiosk/azure/gpt-5.6-sol', label: 'Azure GPT-5.6 Sol' },
       { id: 'tokenkiosk/bedrock/kimi-k2.5', label: 'AWS Bedrock Kimi K2.5' },
       { id: 'tokenkiosk/bedrock/kimi-k2-thinking', label: 'AWS Bedrock Kimi K2 Thinking' },
-      { id: 'tokenkiosk/bedrock/claude-opus-4-7', label: 'AWS Bedrock Claude Opus 4.7' },
-      { id: 'tokenkiosk/bedrock/claude-opus-4-6', label: 'AWS Bedrock Claude Opus 4.6' },
-      { id: 'tokenkiosk/bedrock/claude-opus-4-5-20251101', label: 'AWS Bedrock Claude Opus 4.5' },
+      { id: 'tokenkiosk/claude-opus-latest', label: 'Claude Opus (latest)' },
     ],
   },
   {

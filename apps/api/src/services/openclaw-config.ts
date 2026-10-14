@@ -77,15 +77,17 @@ export interface OpenClawConfig {
   env?: Record<string, string>;
   models?: {
     providers: Record<string, {
-      baseUrl: string;
-      apiKey: string;
-      api: string;
+      /** baseUrl/apiKey/api are required for custom (OpenAI-compatible) providers and
+       *  omitted when only extending a built-in provider's model list (e.g. google). */
+      baseUrl?: string;
+      apiKey?: string;
+      api?: string;
       models: {
         id: string;
         name: string;
         reasoning?: boolean;
         input?: string[];
-        cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+        cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
         contextWindow: number;
         maxTokens: number;
         compat?: { maxTokensField?: 'max_tokens' | 'max_completion_tokens' };
@@ -262,12 +264,25 @@ export function generateOpenClawConfig(options: {
         { id: 'azure/gpt-5.6-sol', name: 'Azure GPT-5.6 Sol', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 30, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1050000, maxTokens: 32000, compat: kioskCompat },
         { id: 'bedrock/kimi-k2.5', name: 'AWS Bedrock Kimi K2.5', input: ['text'], cost: { input: 0.72, output: 3.6, cacheRead: 0, cacheWrite: 0 }, contextWindow: 256000, maxTokens: 16000, compat: kioskCompat },
         { id: 'bedrock/kimi-k2-thinking', name: 'AWS Bedrock Kimi K2 Thinking', reasoning: true, input: ['text'], cost: { input: 0.73, output: 3.03, cacheRead: 0, cacheWrite: 0 }, contextWindow: 256000, maxTokens: 16000, compat: kioskCompat },
-        { id: 'bedrock/claude-opus-4-7', name: 'AWS Bedrock Claude Opus 4.7', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 25, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 32000, compat: kioskCompat },
-        { id: 'bedrock/claude-opus-4-6', name: 'AWS Bedrock Claude Opus 4.6', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 25, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 32000, compat: kioskCompat },
-        { id: 'bedrock/claude-opus-4-5-20251101', name: 'AWS Bedrock Claude Opus 4.5', reasoning: true, input: ['text', 'image'], cost: { input: 5, output: 25, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 32000, compat: kioskCompat },
+        // The kiosk's rolling alias (unprefixed; the kiosk's catalog no longer
+        // lists <provider>/<model> ids, though the prefixed forms still route).
+        // Tracks the newest Opus — 5.5 as of 2026-10-14; 1M context, $4/$20 per 1M.
+        { id: 'claude-opus-latest', name: 'Claude Opus (latest)', reasoning: true, input: ['text', 'image'], cost: { input: 4, output: 20, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000000, maxTokens: 32000, compat: kioskCompat },
       ],
     };
   }
+  // Google: gemini-4-argon is served by the Gemini API but is not in OpenClaw's
+  // bundled or remote model catalog (as of 2026.10.3), so referencing it fails
+  // with "Unknown model" unless it is declared under the built-in provider.
+  // Declaring only `models` extends the catalog; auth still comes from the
+  // google auth profile. Emitted unconditionally because DEFAULT_PRIMARY below
+  // is a google model even for members without a google key — a missing
+  // declaration would turn "no credentials" into the misleading "Unknown model".
+  customProviders.google = {
+    models: [
+      { id: 'gemini-4-argon', name: 'Gemini 4 Argon', reasoning: true, input: ['text', 'image'], contextWindow: 1048576, maxTokens: 32768 },
+    ],
+  };
   if (Object.keys(customProviders).length > 0) {
     config.models = { providers: customProviders };
   }
@@ -276,10 +291,10 @@ export function generateOpenClawConfig(options: {
   //  - If the org pinned a primary provider (Admin → API Keys) AND the member
   //    has a key for it, that provider's model (honoring the per-provider
   //    model override) becomes primary; other active providers are fallbacks.
-  //  - Otherwise the primary defaults to google/gemini-3.1-pro-preview —
+  //  - Otherwise the primary defaults to google/gemini-4-argon —
   //    NOT the first active provider — so gateways behave consistently no
   //    matter which keys happen to exist.
-  const DEFAULT_PRIMARY = 'google/gemini-3.1-pro-preview';
+  const DEFAULT_PRIMARY = 'google/gemini-4-argon';
   const overrides = options.modelOverrides ?? {};
   const resolveModel = (p: (typeof PROVIDERS)[number]) => overrides[p.id] || p.defaultModel;
 
@@ -381,7 +396,7 @@ export function mergeOpenClawConfig(
   gw.controlUi = generated.gateway.controlUi;
   gw.trustedProxies = generated.gateway.trustedProxies;
 
-  // Platform-managed: models.providers (custom providers: claw-proxy, Token Kiosk)
+  // Platform-managed: models.providers (custom providers: claw-proxy, Token Kiosk; google model declarations)
   if (generated.models) {
     merged.models = generated.models;
   } else {
