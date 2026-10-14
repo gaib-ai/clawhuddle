@@ -69,6 +69,18 @@ if [ -n "$OPENCLAW_VERSION" ]; then
   done
 fi
 
+# Per-member environment. Anything in the mounted state dir's `env` file is
+# exported into the gateway process (and so into every command the agent
+# runs). Lets tools that need runtime env (e.g. gog's keyring password) be
+# configured per gateway without platform env support, and survive redeploys.
+# Format: KEY=value lines, no quotes needed; keep it chmod 600.
+if [ -f /root/.openclaw/env ]; then
+  set -a
+  . /root/.openclaw/env
+  set +a
+  echo "[entrypoint] loaded per-member env from /root/.openclaw/env"
+fi
+
 # Start gateway in background so we can run the auto-approve loop.
 openclaw gateway &
 GATEWAY_PID=$!
