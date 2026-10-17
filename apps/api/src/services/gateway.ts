@@ -180,7 +180,7 @@ function createTraefikLabels(
  * own database, which reconcile needs to tell an operator replacing a key apart
  * from OpenClaw refreshing one.
  */
-function writeAuthProfiles(orgId: string, userId: string): {
+function writeAuthProfiles(orgId: string, userId: string, persist = true): {
   providerIds: string[];
   modelOverrides: Record<string, string>;
   clawProxyKey: string | null;
@@ -287,15 +287,17 @@ function writeAuthProfiles(orgId: string, userId: string): {
     getGatewayDir(orgId, userId),
     "agents", "main", "agent", "auth-profiles.json",
   );
-  fs.mkdirSync(path.dirname(authProfilesPath), { recursive: true });
-  fs.writeFileSync(
-    authProfilesPath,
-    JSON.stringify({
-      version: 1,
-      profiles,
-      ...(Object.keys(orderFiltered).length > 0 ? { order: orderFiltered } : {}),
-    }, null, 2),
-  );
+  if (persist) {
+    fs.mkdirSync(path.dirname(authProfilesPath), { recursive: true });
+    fs.writeFileSync(
+      authProfilesPath,
+      JSON.stringify({
+        version: 1,
+        profiles,
+        ...(Object.keys(orderFiltered).length > 0 ? { order: orderFiltered } : {}),
+      }, null, 2),
+    );
+  }
 
   return { providerIds, modelOverrides, clawProxyKey, tokenKioskKey, profiles, fingerprints };
 }
@@ -434,12 +436,10 @@ function regenerateGatewayConfig(orgId: string, userId: string): boolean {
   const gatewayDir = getGatewayDir(orgId, userId);
   if (!fs.existsSync(gatewayDir)) return false;
 
-  const { providerIds, modelOverrides, clawProxyKey, tokenKioskKey } = writeAuthProfiles(orgId, userId);
-
   const db = getDb();
   const member = db
     .prepare(
-      `SELECT id, gateway_token, gateway_subdomain, gateway_port FROM org_members
+      `SELECT id, gateway_token, gateway_subdomain, gateway_port, gateway_status FROM org_members
        WHERE org_id = ? AND user_id = ?`,
     )
     .get(orgId, userId) as {
@@ -447,7 +447,22 @@ function regenerateGatewayConfig(orgId: string, userId: string): boolean {
     gateway_token: string | null;
     gateway_subdomain: string | null;
     gateway_port: number | null;
+    gateway_status: string | null;
   } | undefined;
+
+  // OpenClaw 2026.10.x keeps credentials in SQLite and treats auth-profiles.json
+  // as a legacy source that only Doctor (at boot) may import. Dropping a fresh
+  // copy next to a RUNNING gateway makes it refuse every provider named in the
+  // file ("requires legacy credential migration") until the next restart — that
+  // is how an org-key edit on 2026-10-16 took every gateway offline. So while
+  // the container is up, credentials are applied on the next start/redeploy
+  // (both rewrite the file); only openclaw.json (model config, kiosk/proxy
+  // keys) is refreshed now, which the gateway hot-reloads.
+  const live = member?.gateway_status === "running" || member?.gateway_status === "deploying";
+  const { providerIds, modelOverrides, clawProxyKey, tokenKioskKey } = writeAuthProfiles(orgId, userId, !live);
+  if (live) {
+    console.log(`[gateway] auth-profiles for ${orgId}/${userId} deferred to next restart (gateway is ${member?.gateway_status})`);
+  }
 
   if (!member?.gateway_token || !member.gateway_subdomain) {
     // No provisioned gateway yet — auth-profiles.json is enough; openclaw.json
@@ -486,9 +501,10 @@ function regenerateGatewayConfig(orgId: string, userId: string): boolean {
  * Sync every gateway in the org. Called after an org-level change (org-default
  * key add/delete, primary_provider update) that may affect every member.
  *
- * Note: auth-profiles.json hot-reloads, but agents.defaults in openclaw.json
- * is read at gateway startup. Primary-provider changes take effect for new
- * gateway starts; running gateways keep their current primary until restart.
+ * Note: openclaw.json hot-reloads (model config, custom-provider keys), but
+ * auth-profiles.json is only imported by Doctor at boot and must not be
+ * rewritten under a running gateway (see regenerateGatewayConfig). Standard
+ * provider key changes therefore take effect on each gateway's next restart.
  */
 export function syncAuthProfiles(orgId: string): void {
   const db = getDb();

@@ -48,6 +48,26 @@ const FORCE_DISABLED_PLUGINS = [
   'imessage',
 ];
 
+export interface SlackStreaming {
+  mode: 'off' | 'partial' | 'block' | 'progress';
+  progress?: { toolProgress?: boolean; commandText?: 'status' | 'raw' };
+}
+
+/**
+ * Live progress for Slack replies. Platform-managed: mergeOpenClawConfig
+ * overlays it onto a member's existing Slack block on every redeploy, so a
+ * change here reaches all gateways without touching their tokens.
+ *
+ * `progress` (OpenClaw's default since 2026.8.1) streams one task card per
+ * turn; `toolProgress: true` adds a row per tool call, and `commandText:
+ * 'status'` keeps raw shell text out of Slack. The generator used to force
+ * `off`, which hid 3–7 minute agentic turns behind total silence.
+ */
+const SLACK_STREAMING: SlackStreaming = {
+  mode: 'progress',
+  progress: { toolProgress: true, commandText: 'status' },
+};
+
 /**
  * An entry in agents.defaults.models. `agentRuntime` binds the model to an
  * OpenClaw agent runtime, which then serves it from its linked account instead
@@ -65,9 +85,15 @@ export interface ChannelTokens {
 }
 
 export interface OpenClawConfig {
+  /**
+   * Owned by OpenClaw's Doctor after first boot: it bumps lastTouchedVersion and
+   * records which config migrations already ran. Since 2026.10.x the schema is
+   * strict — a key it does not know (the old `lastTouchedAt`) makes the whole
+   * file invalid, and a running gateway then refuses every config reload.
+   */
   meta: {
     lastTouchedVersion: string;
-    lastTouchedAt: string;
+    migrations?: Record<string, boolean>;
   };
   commands: {
     native: string;
@@ -100,7 +126,6 @@ export interface OpenClawConfig {
     bind: string;
     controlUi: {
       enabled: boolean;
-      allowInsecureAuth: boolean;
       allowedOrigins?: string[];
       dangerouslyAllowHostHeaderOriginFallback?: boolean;
     };
@@ -115,6 +140,8 @@ export interface OpenClawConfig {
     defaults: {
       model: { primary: string; fallbacks?: string[] };
       models: Record<string, ModelEntry>;
+      /** 2026.10.x allowlist for `--model` overrides; Doctor derives it from `models` when missing. */
+      modelPolicy?: { allow: string[] };
       thinkingDefault?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'adaptive';
     };
     list?: Array<{
@@ -132,7 +159,7 @@ export interface OpenClawConfig {
     allowFrom?: string[];
     groupPolicy?: string;
     allowBots?: boolean;
-    streaming?: { mode: string };
+    streaming?: SlackStreaming;
     dm?: { enabled: boolean; policy?: string };
   }>;
   plugins: {
@@ -177,9 +204,9 @@ export function generateOpenClawConfig(options: {
   }
 
   const config: OpenClawConfig = {
+    // Fresh config only; mergeOpenClawConfig keeps whatever Doctor has recorded.
     meta: {
       lastTouchedVersion: '2026.2.17',
-      lastTouchedAt: new Date().toISOString(),
     },
     commands: {
       native: 'auto',
@@ -190,9 +217,10 @@ export function generateOpenClawConfig(options: {
       mode: 'local',
       port,
       bind: 'loopback',
+      // allowInsecureAuth was dropped from the schema in 2026.10.x (Doctor
+      // deleted it on every gateway); the Control UI is served over TLS anyway.
       controlUi: {
         enabled: true,
-        allowInsecureAuth: true,
         ...(options.allowedOrigins?.length ? { allowedOrigins: options.allowedOrigins } : {}),
         ...(options.useHostHeaderFallback ? { dangerouslyAllowHostHeaderOriginFallback: true } : {}),
       },
@@ -329,7 +357,16 @@ export function generateOpenClawConfig(options: {
     defaults: {
       model: { primary, ...(fallbacks.length > 0 ? { fallbacks } : {}) },
       models,
-      thinkingDefault: 'medium',
+      // Same list Doctor would derive from `models`; emitting it ourselves keeps
+      // a hot-reloaded config identical to a freshly migrated one.
+      modelPolicy: { allow: Object.keys(models) },
+      // Chat turns are agentic loops of 20–40 model calls; at `medium` each
+      // call cost ~9 s on gemini-4-argon (2026-10-16 profiling of a member's
+      // Slack replies). `low` keeps tool use intact and trims every step.
+      // Automations that need deeper reasoning set their own level
+      // (`openclaw automations edit <id> --thinking medium`), which lives in
+      // the automation store and wins over this default.
+      thinkingDefault: 'low',
     },
     list: [{ id: 'main', default: true, reasoningDefault: 'off' }],
   };
@@ -353,7 +390,7 @@ export function generateOpenClawConfig(options: {
         ...(ct.slack.appToken ? { appToken: ct.slack.appToken } : {}),
         groupPolicy: 'open',
         allowBots: true,
-        streaming: { mode: 'off' },
+        streaming: SLACK_STREAMING,
         dmPolicy: 'open',
         dm: { enabled: true, policy: 'open' },
         allowFrom: ['*'],
@@ -380,8 +417,16 @@ export function mergeOpenClawConfig(
   // Deep clone existing to avoid mutation
   const merged = JSON.parse(JSON.stringify(existing)) as Record<string, unknown>;
 
-  // Platform-managed: meta
-  merged.meta = generated.meta;
+  // meta: Doctor owns it once the gateway has booted (lastTouchedVersion and
+  // the migrations ledger). Overwriting it re-ran every config migration on
+  // each redeploy; keep it, and only strip keys the 2026.10.x schema rejects.
+  const existingMeta = merged.meta;
+  if (existingMeta && typeof existingMeta === 'object' && typeof (existingMeta as Record<string, unknown>).lastTouchedVersion === 'string') {
+    const { lastTouchedAt: _dropped, ...kept } = existingMeta as Record<string, unknown>;
+    merged.meta = kept;
+  } else {
+    merged.meta = generated.meta;
+  }
 
   // Platform-managed: gateway auth, port, bind, controlUi, trustedProxies
   // (preserve any user-added gateway fields like custom mode settings)
@@ -432,6 +477,14 @@ export function mergeOpenClawConfig(
     for (const [channelId, channelCfg] of Object.entries(generated.channels)) {
       if (!(channelId in mergedChannels)) {
         mergedChannels[channelId] = channelCfg;
+        continue;
+      }
+      // Platform-managed presentation keys ride on top of the user's channel
+      // block (tokens, allowlists and accounts stay theirs). Without this an
+      // existing Slack block kept the `streaming: off` an older generator wrote.
+      const existing = mergedChannels[channelId];
+      if (channelCfg.streaming && existing && typeof existing === 'object' && !Array.isArray(existing)) {
+        (existing as Record<string, unknown>).streaming = channelCfg.streaming;
       }
     }
   }
