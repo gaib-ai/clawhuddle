@@ -10,13 +10,14 @@ import { signApiToken, verifyApiToken } from '@clawhuddle/shared';
  * The API used to trust a client-supplied x-user-id header, and the members
  * list handed every member every colleague's gateway token. These pin the fix:
  * only tokens signed with API_AUTH_SECRET authenticate, and gateway tokens only
- * go back to their owner.
+ * go back to their owner — or to an admin who explicitly asks for one.
  */
 
 const SECRET = 'test-secret-'.padEnd(48, 'x');
 const ORG = 'org-1';
 const ADMIN = { id: 'user-admin', email: 'admin@example.com', token: 'gw-token-admin' };
 const MEMBER = { id: 'user-member', email: 'member@example.com', token: 'gw-token-member' };
+const OTHER_ADMIN = { id: 'user-admin2', email: 'admin2@example.com', token: 'gw-token-admin2' };
 
 let tmpDir: string;
 let app: FastifyInstance;
@@ -35,7 +36,7 @@ beforeAll(async () => {
   const here = path.dirname(fileURLToPath(import.meta.url));
   db.exec(fs.readFileSync(path.join(here, '../db/schema.sql'), 'utf-8'));
   db.prepare('INSERT INTO organizations (id, name, slug) VALUES (?, ?, ?)').run(ORG, 'Org', 'org');
-  for (const [u, role] of [[ADMIN, 'owner'], [MEMBER, 'member']] as const) {
+  for (const [u, role] of [[ADMIN, 'owner'], [MEMBER, 'member'], [OTHER_ADMIN, 'admin']] as const) {
     db.prepare('INSERT INTO users (id, email) VALUES (?, ?)').run(u.id, u.email);
     db.prepare(
       'INSERT INTO org_members (id, org_id, user_id, role, gateway_token) VALUES (?, ?, ?, ?, ?)',
@@ -45,11 +46,13 @@ beforeAll(async () => {
   const { authRoutes } = await import('../routes/auth.js');
   const { orgPlugin } = await import('./auth.js');
   const { orgMemberRoutes } = await import('../routes/org/members.js');
+  const { orgGatewayRoutes } = await import('../routes/org/gateways.js');
   app = Fastify();
   await app.register(authRoutes);
   await app.register(async (instance) => {
     await instance.register(orgPlugin);
     await instance.register(orgMemberRoutes);
+    await instance.register(orgGatewayRoutes);
   });
   await app.ready();
 });
@@ -150,11 +153,19 @@ describe('members list', () => {
   };
 
   it("hides other members' gateway tokens from a member", async () => {
-    expect(await tokensSeenBy(MEMBER.id)).toEqual({ [MEMBER.id]: MEMBER.token, [ADMIN.id]: null });
+    expect(await tokensSeenBy(MEMBER.id)).toEqual({
+      [MEMBER.id]: MEMBER.token,
+      [ADMIN.id]: null,
+      [OTHER_ADMIN.id]: null,
+    });
   });
 
   it("hides members' gateway tokens from an owner too", async () => {
-    expect(await tokensSeenBy(ADMIN.id)).toEqual({ [ADMIN.id]: ADMIN.token, [MEMBER.id]: null });
+    expect(await tokensSeenBy(ADMIN.id)).toEqual({
+      [ADMIN.id]: ADMIN.token,
+      [MEMBER.id]: null,
+      [OTHER_ADMIN.id]: null,
+    });
   });
 
   it("hides the target's gateway token when an owner updates a member", async () => {
@@ -166,5 +177,33 @@ describe('members list', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().data.gateway_token).toBeNull();
+  });
+});
+
+describe('admin gateway access', () => {
+  const access = async (viewerId: string, target: { id: string }) =>
+    app.inject({
+      method: 'GET',
+      url: `/api/orgs/${ORG}/gateways/members/om-${target.id}/access`,
+      headers: bearer(await userToken(viewerId)),
+    });
+
+  it("gives an admin a member's gateway token", async () => {
+    const res = await access(OTHER_ADMIN.id, MEMBER);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.gateway_token).toBe(MEMBER.token);
+    expect(res.headers['cache-control']).toBe('no-store');
+  });
+
+  it('gives an owner any gateway token', async () => {
+    expect((await access(ADMIN.id, OTHER_ADMIN)).json().data.gateway_token).toBe(OTHER_ADMIN.token);
+  });
+
+  it("refuses an admin an owner's gateway", async () => {
+    expect((await access(OTHER_ADMIN.id, ADMIN)).statusCode).toBe(403);
+  });
+
+  it('refuses plain members', async () => {
+    expect((await access(MEMBER.id, OTHER_ADMIN)).statusCode).toBe(403);
   });
 });
