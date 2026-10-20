@@ -31,6 +31,7 @@ services:
     environment:
       - NEXTAUTH_URL=${NEXTAUTH_URL:-http://localhost:3000}
       - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
+      - API_AUTH_SECRET=${API_AUTH_SECRET:?set API_AUTH_SECRET (openssl rand -hex 32)}
       - AUTH_TRUST_HOST=true
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
@@ -65,6 +66,7 @@ services:
       - DATA_DIR=/data
       - HOST_DATA_DIR=${HOST_DATA_DIR:-${PWD}/data}
       - PORT=4000
+      - API_AUTH_SECRET=${API_AUTH_SECRET:?set API_AUTH_SECRET (openssl rand -hex 32)}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - CLAW_PROXY_URL=${CLAW_PROXY_URL:-}  # optional: override default http://claw-proxy:3456/v1
       - RESEND_API_KEY=${RESEND_API_KEY:-}

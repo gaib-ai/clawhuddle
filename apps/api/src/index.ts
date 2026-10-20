@@ -5,7 +5,7 @@ import dotenv from 'dotenv';
 dotenv.config({ path: '../../.env' });
 import { authRoutes } from './routes/auth.js';
 import { orgRoutes } from './routes/orgs.js';
-import { orgPlugin } from './middleware/auth.js';
+import { orgPlugin, getApiAuthSecret } from './middleware/auth.js';
 import { orgMemberRoutes } from './routes/org/members.js';
 import { orgSkillRoutes } from './routes/org/skills.js';
 import { orgApiKeyRoutes } from './routes/org/api-keys.js';
@@ -17,6 +17,9 @@ import { orgPortForwardRoutes } from './routes/org/port-forwards.js';
 import { superAdminRoutes } from './routes/super-admin.js';
 import { getDb } from './db/index.js';
 import { syncAllPortForwards } from './services/port-forward.js';
+
+// Refuse to start without the secret API tokens are verified with
+getApiAuthSecret();
 
 const app = Fastify({ logger: true });
 

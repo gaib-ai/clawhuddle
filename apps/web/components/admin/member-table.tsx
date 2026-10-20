@@ -70,7 +70,7 @@ export function MemberTable({ initialMembers }: Props) {
   const orgFetch = useCallback(
     <T,>(path: string, options?: RequestInit) => {
       if (!currentOrgId || !userId) return Promise.reject(new Error('No org'));
-      return createOrgFetch(currentOrgId, userId)<T>(path, options);
+      return createOrgFetch(currentOrgId)<T>(path, options);
     },
     [currentOrgId, userId]
   );
@@ -275,7 +275,10 @@ export function MemberTable({ initialMembers }: Props) {
     if (member.gateway_status === 'running') {
       return (
         <span className="flex gap-3">
-          <ActionBtn onClick={() => openGateway(member)} color="success">Open</ActionBtn>
+          {/* The API only returns your own gateway token, so only your own gateway can be opened */}
+          {member.gateway_token && (
+            <ActionBtn onClick={() => openGateway(member)} color="success">Open</ActionBtn>
+          )}
           <ActionBtn onClick={() => gatewayAction(member.id, 'redeploy')}>Redeploy</ActionBtn>
           <ActionBtn onClick={() => gatewayAction(member.id, 'stop')}>Stop</ActionBtn>
           <ActionBtn onClick={() => gatewayAction(member.id, 'remove')} color="danger">Remove</ActionBtn>

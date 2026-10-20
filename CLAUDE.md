@@ -16,6 +16,14 @@ Monorepo
 
 **Data flow**: Frontend → API server → generates `openclaw.json` + `auth-profiles.json` → mounts into per-user Docker containers → OpenClaw gateway reads config on startup.
 
+## API Authentication
+
+The API never trusts a client-supplied user id. Both apps share `API_AUTH_SECRET` (≥ 32 chars; the API refuses to start without it) and use the HS256 helpers in `packages/shared/src/api-token.ts`:
+
+- **User tokens** (`aud: 'user'`, 1h): minted in NextAuth's `jwt` callback (`apps/web/lib/auth.ts`), re-minted when < 15 min remain, exposed as `session.apiToken`. `apiFetch` (`apps/web/lib/api.ts`) attaches it as `Authorization: Bearer …` and retries once after refreshing the session on a 401. `authPlugin` verifies it.
+- **Internal tokens** (`aud: 'internal'`, 60s): the web server's calls to `/api/auth/login` and `/api/auth/check-access`, guarded by `requireInternal`. These routes return any user's id by email, so they must never be reachable without one.
+- `gateway_token` is a bearer credential: member responses only include it for the caller's own row.
+
 ## Claw Proxy Integration
 
 claw-proxy routes OpenAI-format requests through `claude -p` CLI using Claude Max subscriptions. It registers as a **custom OpenClaw provider** (not env var override).

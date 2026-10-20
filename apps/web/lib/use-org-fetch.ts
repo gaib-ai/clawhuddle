@@ -12,7 +12,7 @@ export function useOrgFetch() {
 
   const orgFetch = useMemo(() => {
     if (!currentOrgId || !userId) return null;
-    return createOrgFetch(currentOrgId, userId);
+    return createOrgFetch(currentOrgId);
   }, [currentOrgId, userId]);
 
   const ready = !!orgFetch;

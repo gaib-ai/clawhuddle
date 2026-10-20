@@ -11,9 +11,7 @@ export function useSuperAdmin() {
 
   useEffect(() => {
     if (!userId) return;
-    apiFetch<{ data: { isSuperAdmin: boolean } }>('/api/super-admin/check', {
-      headers: { 'x-user-id': userId },
-    })
+    apiFetch<{ data: { isSuperAdmin: boolean } }>('/api/super-admin/check')
       .then((res) => setIsSuperAdmin(res.data.isSuperAdmin))
       .catch(() => setIsSuperAdmin(false));
   }, [userId]);

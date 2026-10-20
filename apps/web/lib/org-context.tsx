@@ -45,9 +45,7 @@ export function OrgProvider({ children }: { children: ReactNode }) {
   const refreshOrgs = useCallback(async () => {
     if (!userId) return;
     try {
-      const res = await apiFetch<{ data: OrgWithRole[] }>('/api/orgs', {
-        headers: { 'x-user-id': userId },
-      });
+      const res = await apiFetch<{ data: OrgWithRole[] }>('/api/orgs');
       setOrgs(res.data);
 
       // If current org is no longer valid, reset

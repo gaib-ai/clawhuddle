@@ -97,6 +97,8 @@ Edit `.env` with your values:
 # Auth
 NEXTAUTH_URL=http://localhost:3000
 NEXTAUTH_SECRET=change-me-to-random-secret
+# Signs web→API tokens; must be identical for web and api (openssl rand -hex 32)
+API_AUTH_SECRET=
 
 # LLM API key (at least one provider required)
 ANTHROPIC_API_KEY=sk-ant-...
@@ -147,6 +149,7 @@ This starts Traefik, the web frontend, the API server, and builds the gateway ba
 | --------------------------- | ------------------------------------------------------------------- | ----------------------- |
 | `NEXTAUTH_URL`              | Frontend URL                                                        | `http://localhost:3000` |
 | `NEXTAUTH_SECRET`           | Session encryption secret                                           | **(required)**          |
+| `API_AUTH_SECRET`           | Signs the short-lived tokens the web app uses to call the API (≥ 32 chars; web and api must match) | **(required)** |
 | `GOOGLE_CLIENT_ID`          | Google OAuth client ID                                              | —                       |
 | `GOOGLE_CLIENT_SECRET`      | Google OAuth client secret                                          | —                       |
 | `ALLOWED_DOMAIN`            | Restrict sign-in to email domain(s), comma-separated (e.g. `company.com,partner.com`) | — |

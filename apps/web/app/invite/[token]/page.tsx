@@ -45,7 +45,6 @@ export default function InvitePage() {
     try {
       await apiFetch('/api/invitations/accept', {
         method: 'POST',
-        headers: { 'x-user-id': userId },
         body: JSON.stringify({ token }),
       });
       await refreshOrgs();

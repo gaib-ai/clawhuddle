@@ -8,6 +8,15 @@ import { getOrgContainerIds, syncAuthProfilesForUser } from '../../services/gate
 import type { InviteMemberRequest, UpdateMemberRequest } from '@clawhuddle/shared';
 import { DEFAULT_MAX_MEMBERS, PROVIDER_IDS } from '@clawhuddle/shared';
 
+// gateway_token is a bearer credential for that member's gateway, so it only
+// ever goes back to the member who owns it — not to colleagues or admins.
+function withoutOthersGatewayToken<T extends { user_id: string; gateway_token?: string | null }>(
+  member: T,
+  viewerUserId: string,
+): T {
+  return member.user_id === viewerUserId ? member : { ...member, gateway_token: null };
+}
+
 export async function orgMemberRoutes(app: FastifyInstance) {
   // List members
   app.get('/api/orgs/:orgId/members', async (request) => {
@@ -27,7 +36,7 @@ export async function orgMemberRoutes(app: FastifyInstance) {
       m.container_id = userPrefix ? (containerIds.get(userPrefix) || null) : null;
     }
 
-    return { data: members };
+    return { data: members.map((m) => withoutOthersGatewayToken(m, request.currentUser!.id)) };
   });
 
   // Invite member (admin+ only)
@@ -190,9 +199,9 @@ export async function orgMemberRoutes(app: FastifyInstance) {
          FROM org_members om
          JOIN users u ON u.id = om.user_id
          WHERE om.id = ?`
-      ).get(memberId);
+      ).get(memberId) as any;
 
-      return { data: updated };
+      return { data: withoutOthersGatewayToken(updated, request.currentUser!.id) };
     }
   );
 
