@@ -66,6 +66,49 @@ describe('reply latency defaults (2026-10-16)', () => {
   });
 });
 
+describe('Slack access (2026-10-21)', () => {
+  type MergeInput = Parameters<typeof mergeOpenClawConfig>[0];
+  const legacyOpenSlack = () => ({
+    enabled: true,
+    mode: 'socket',
+    botToken: 'xoxb-test',
+    appToken: 'xapp-test',
+    groupPolicy: 'open',
+    allowBots: true,
+    dmPolicy: 'open',
+    dm: { enabled: true, policy: 'open' },
+    allowFrom: ['*'],
+  });
+
+  it('only answers paired DMs and allowlisted channels, and ignores other bots', () => {
+    const slack = generateOpenClawConfig(withSlack).channels!.slack!;
+    expect(slack).toMatchObject({ dmPolicy: 'pairing', groupPolicy: 'allowlist', allowBots: false });
+    expect(slack.allowFrom).toBeUndefined();
+    expect(slack.dm).toBeUndefined();
+  });
+
+  it('locks down a Slack block still carrying the old open platform default', () => {
+    const existing = { ...generateOpenClawConfig(withSlack), channels: { slack: legacyOpenSlack() } };
+    const slack = mergeOpenClawConfig(existing as unknown as MergeInput, withSlack).channels!.slack!;
+    expect(slack).toMatchObject({ dmPolicy: 'pairing', groupPolicy: 'allowlist', allowBots: false, botToken: 'xoxb-test' });
+    expect(slack.allowFrom).toBeUndefined();
+    expect(slack.dm).toEqual({ enabled: true });
+  });
+
+  it('locks it down even when the member no longer has a Slack token with us', () => {
+    const existing = { ...generateOpenClawConfig(base), channels: { slack: legacyOpenSlack() } };
+    const slack = mergeOpenClawConfig(existing as unknown as MergeInput, base).channels!.slack!;
+    expect(slack.dmPolicy).toBe('pairing');
+  });
+
+  it("leaves a Slack block the member customised alone", () => {
+    const custom = { ...legacyOpenSlack(), allowFrom: ['U123'], dmPolicy: 'allowlist' };
+    const existing = { ...generateOpenClawConfig(withSlack), channels: { slack: custom } };
+    const slack = mergeOpenClawConfig(existing as unknown as MergeInput, withSlack).channels!.slack!;
+    expect(slack).toMatchObject({ dmPolicy: 'allowlist', allowFrom: ['U123'], groupPolicy: 'open', allowBots: true });
+  });
+});
+
 describe('mergeOpenClawConfig meta handling', () => {
   it('keeps the meta Doctor recorded, including its migrations ledger', () => {
     const existing = {

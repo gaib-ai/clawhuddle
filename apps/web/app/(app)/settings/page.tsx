@@ -23,7 +23,7 @@ export default function SettingsPage() {
   const orgFetch = useCallback(
     <T,>(path: string, options?: RequestInit) => {
       if (!currentOrgId || !userId) return Promise.reject(new Error('No org'));
-      return createOrgFetch(currentOrgId, userId)<T>(path, options);
+      return createOrgFetch(currentOrgId)<T>(path, options);
     },
     [currentOrgId, userId]
   );
@@ -45,7 +45,6 @@ export default function SettingsPage() {
     try {
       await apiFetch(`/api/orgs/${currentOrgId}`, {
         method: 'DELETE',
-        headers: { 'x-user-id': userId },
       });
       toast('Organization deleted', 'success');
       await refreshOrgs();

@@ -56,7 +56,6 @@ function CreateOrgView({ onCreated }: { onCreated: () => Promise<void> }) {
     try {
       await apiFetch('/api/orgs', {
         method: 'POST',
-        headers: { 'x-user-id': userId },
         body: JSON.stringify({ name: orgName.trim() }),
       });
       await onCreated();

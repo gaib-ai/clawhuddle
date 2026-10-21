@@ -38,9 +38,7 @@ export default function SuperAdminPage() {
 
   const fetchOrgs = () => {
     if (!userId || !isSuperAdmin) return;
-    apiFetch<{ data: OrgWithCount[] }>('/api/super-admin/orgs', {
-      headers: { 'x-user-id': userId },
-    })
+    apiFetch<{ data: OrgWithCount[] }>('/api/super-admin/orgs')
       .then((res) => setOrgs(res.data))
       .catch(() => toast('Failed to load organizations', 'error'))
       .finally(() => setLoading(false));
@@ -48,9 +46,7 @@ export default function SuperAdminPage() {
 
   const fetchRules = () => {
     if (!userId || !isSuperAdmin) return;
-    apiFetch<{ data: AccessRule[] }>('/api/super-admin/access-rules', {
-      headers: { 'x-user-id': userId },
-    })
+    apiFetch<{ data: AccessRule[] }>('/api/super-admin/access-rules')
       .then((res) => setRules(res.data))
       .catch(() => toast('Failed to load access rules', 'error'));
   };
@@ -66,7 +62,6 @@ export default function SuperAdminPage() {
     try {
       const res = await apiFetch<{ data: AccessRule }>('/api/super-admin/access-rules', {
         method: 'POST',
-        headers: { 'x-user-id': userId },
         body: JSON.stringify({ type: ruleType, value: ruleValue.trim() }),
       });
       setRules((prev) => [res.data, ...prev]);
@@ -85,7 +80,6 @@ export default function SuperAdminPage() {
     try {
       await apiFetch(`/api/super-admin/access-rules/${rule.id}`, {
         method: 'DELETE',
-        headers: { 'x-user-id': userId },
       });
       setRules((prev) => prev.filter((r) => r.id !== rule.id));
       toast('Rule removed', 'success');
@@ -109,7 +103,6 @@ export default function SuperAdminPage() {
     try {
       await apiFetch(`/api/super-admin/orgs/${org.id}`, {
         method: 'DELETE',
-        headers: { 'x-user-id': userId },
       });
       toast(`"${org.name}" deleted`, 'success');
       setOrgs((prev) => prev.filter((o) => o.id !== org.id));

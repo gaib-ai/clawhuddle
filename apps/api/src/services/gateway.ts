@@ -17,15 +17,17 @@ const GATEWAY_IMAGE = "clawhuddle-gateway:local";
 const GATEWAY_INTERNAL_PORT = 6100;
 const GATEWAY_EXTERNAL_PORT = 6101;
 const CONTAINER_PREFIX = "clawhuddle-gw-";
-const DOCKER_NETWORK = process.env.DOCKER_NETWORK || "clawhuddle-net";
+// Gateways run agent-controlled code, so they get a network of their own shared
+// only with what they must reach (Traefik, claw-proxy) — never the API or web.
+const GATEWAY_NETWORK = process.env.GATEWAY_NETWORK || "clawhuddle-gateways";
 const DOMAIN = process.env.DOMAIN || "localhost";
 const GATEWAY_DOMAIN = process.env.GATEWAY_DOMAIN || DOMAIN;
 
 async function ensureNetwork(): Promise<void> {
   try {
-    await docker.getNetwork(DOCKER_NETWORK).inspect();
+    await docker.getNetwork(GATEWAY_NETWORK).inspect();
   } catch {
-    await docker.createNetwork({ Name: DOCKER_NETWORK, Driver: "bridge" });
+    await docker.createNetwork({ Name: GATEWAY_NETWORK, Driver: "bridge" });
   }
 }
 
@@ -140,6 +142,8 @@ function createTraefikLabels(
 ): Record<string, string> {
   return {
     "traefik.enable": "true",
+    // Traefik is on both networks; reach the gateway over the gateway network
+    "traefik.docker.network": GATEWAY_NETWORK,
     [`traefik.http.routers.${containerName}.rule`]: `Host(\`${subdomain}.${GATEWAY_DOMAIN}\`)`,
     [`traefik.http.routers.${containerName}.entrypoints`]: "web",
     // Traefik connects to socat port (0.0.0.0:6101) which forwards to OpenClaw loopback port
@@ -567,7 +571,7 @@ function createContainerConfig(
     HostConfig: hostConfig,
     NetworkingConfig: {
       EndpointsConfig: {
-        [DOCKER_NETWORK]: {},
+        [GATEWAY_NETWORK]: {},
       },
     },
   };

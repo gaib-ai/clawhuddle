@@ -70,7 +70,7 @@ export function MemberTable({ initialMembers }: Props) {
   const orgFetch = useCallback(
     <T,>(path: string, options?: RequestInit) => {
       if (!currentOrgId || !userId) return Promise.reject(new Error('No org'));
-      return createOrgFetch(currentOrgId, userId)<T>(path, options);
+      return createOrgFetch(currentOrgId)<T>(path, options);
     },
     [currentOrgId, userId]
   );
@@ -223,14 +223,46 @@ export function MemberTable({ initialMembers }: Props) {
     }
   };
 
-  const openGateway = (member: OrgMember) => {
-    if (!member.gateway_token) return;
+  type GatewayAccess = Pick<OrgMember, 'gateway_token' | 'gateway_subdomain' | 'gateway_port'>;
+
+  const gatewayUrl = ({ gateway_token, gateway_subdomain, gateway_port }: GatewayAccess) => {
+    if (!gateway_token) return null;
     const { protocol, hostname } = window.location;
-    if (hostname === 'localhost' && member.gateway_port) {
-      window.open(`http://localhost:${member.gateway_port}/?token=${member.gateway_token}`, '_blank');
-    } else if (member.gateway_subdomain) {
+    if (hostname === 'localhost' && gateway_port) {
+      return `http://localhost:${gateway_port}/?token=${gateway_token}`;
+    }
+    if (gateway_subdomain) {
       const gwDomain = process.env.NEXT_PUBLIC_GATEWAY_DOMAIN || hostname;
-      window.open(`${protocol}//${member.gateway_subdomain}.${gwDomain}/?token=${member.gateway_token}`, '_blank');
+      return `${protocol}//${gateway_subdomain}.${gwDomain}/?token=${gateway_token}`;
+    }
+    return null;
+  };
+
+  // Same rule as role changes: owners can open any gateway, admins any but an owner's.
+  // The API enforces it; this only decides whether to show the button.
+  const canOpenGateway = (member: OrgMember) =>
+    !!member.gateway_token || memberRole === 'owner' || (memberRole === 'admin' && member.role !== 'owner');
+
+  const openGateway = async (member: OrgMember) => {
+    // Open the tab during the click so popup blockers allow it, then point it at
+    // the gateway once we have the token. Other members' tokens aren't in the
+    // members list — fetch them on demand from the admin-only access endpoint.
+    const win = window.open('', '_blank');
+    if (!win) return;
+    win.opener = null;
+    try {
+      const access: GatewayAccess = member.gateway_token
+        ? member
+        : (await orgFetch<{ data: GatewayAccess }>(`/gateways/members/${member.id}/access`)).data;
+      const url = gatewayUrl(access);
+      if (url) {
+        win.location.href = url;
+      } else {
+        win.close();
+      }
+    } catch (err: any) {
+      win.close();
+      toast(err.message, 'error');
     }
   };
 
@@ -275,7 +307,9 @@ export function MemberTable({ initialMembers }: Props) {
     if (member.gateway_status === 'running') {
       return (
         <span className="flex gap-3">
-          <ActionBtn onClick={() => openGateway(member)} color="success">Open</ActionBtn>
+          {canOpenGateway(member) && (
+            <ActionBtn onClick={() => openGateway(member)} color="success">Open</ActionBtn>
+          )}
           <ActionBtn onClick={() => gatewayAction(member.id, 'redeploy')}>Redeploy</ActionBtn>
           <ActionBtn onClick={() => gatewayAction(member.id, 'stop')}>Stop</ActionBtn>
           <ActionBtn onClick={() => gatewayAction(member.id, 'remove')} color="danger">Remove</ActionBtn>

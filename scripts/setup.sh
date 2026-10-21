@@ -13,6 +13,8 @@ mkdir -p data/skills data/users data/gateways
 # Copy env if not exists
 if [ ! -f .env ]; then
   cp .env.example .env
+  # Fill in the API token signing secret so web and api agree out of the box
+  sed -i.bak "s/^API_AUTH_SECRET=$/API_AUTH_SECRET=$(openssl rand -hex 32)/" .env && rm -f .env.bak
   echo "Created .env — please edit it with your credentials"
 fi
 

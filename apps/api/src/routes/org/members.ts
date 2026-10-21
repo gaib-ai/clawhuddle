@@ -8,6 +8,19 @@ import { getOrgContainerIds, syncAuthProfilesForUser } from '../../services/gate
 import type { InviteMemberRequest, UpdateMemberRequest } from '@clawhuddle/shared';
 import { DEFAULT_MAX_MEMBERS, PROVIDER_IDS } from '@clawhuddle/shared';
 
+// gateway_token is a bearer credential for that member's gateway, so member
+// responses only carry the caller's own. Admins fetch another member's one at a
+// time from GET .../gateways/members/:memberId/access.
+function withoutOthersGatewayToken<T extends { user_id: string; gateway_token?: string | null }>(
+  member: T,
+  viewerUserId: string,
+): T {
+  return member.user_id === viewerUserId ? member : { ...member, gateway_token: null };
+}
+
+export const ROLES = ['owner', 'admin', 'member'];
+const STATUSES = ['active', 'disabled'];
+
 export async function orgMemberRoutes(app: FastifyInstance) {
   // List members
   app.get('/api/orgs/:orgId/members', async (request) => {
@@ -27,7 +40,7 @@ export async function orgMemberRoutes(app: FastifyInstance) {
       m.container_id = userPrefix ? (containerIds.get(userPrefix) || null) : null;
     }
 
-    return { data: members };
+    return { data: members.map((m) => withoutOthersGatewayToken(m, request.currentUser!.id)) };
   });
 
   // Invite member (admin+ only)
@@ -38,6 +51,16 @@ export async function orgMemberRoutes(app: FastifyInstance) {
       const { email, role } = request.body;
       if (!email) {
         return reply.status(400).send({ error: 'validation', message: 'email is required' });
+      }
+      // The body type says admin|member, but it's client input — check it
+      const memberRole: string = role || 'member';
+      if (!ROLES.includes(memberRole)) {
+        return reply.status(400).send({ error: 'validation', message: `role must be one of: ${ROLES.join(', ')}` });
+      }
+      // Only owners can grant owner — on invites too, or an admin could invite a
+      // second account as owner and take over the org
+      if (memberRole === 'owner' && request.orgMember!.role !== 'owner') {
+        return reply.status(403).send({ error: 'forbidden', message: 'Only owners can invite owners' });
       }
 
       const db = getDb();
@@ -85,7 +108,6 @@ export async function orgMemberRoutes(app: FastifyInstance) {
       const token = crypto.randomBytes(32).toString('hex');
       const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(); // 7 days
 
-      const memberRole = role || 'member';
       db.prepare(
         'INSERT INTO invitations (id, org_id, email, role, token, invited_by, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
       ).run(id, request.orgId!, email, memberRole, token, request.currentUser!.id, expiresAt);
@@ -167,6 +189,12 @@ export async function orgMemberRoutes(app: FastifyInstance) {
       if ((role === 'owner' || member.role === 'owner') && request.orgMember!.role !== 'owner') {
         return reply.status(403).send({ error: 'forbidden', message: 'Only owners can manage owner role' });
       }
+      if (role !== undefined && !ROLES.includes(role)) {
+        return reply.status(400).send({ error: 'validation', message: `role must be one of: ${ROLES.join(', ')}` });
+      }
+      if (status !== undefined && !STATUSES.includes(status)) {
+        return reply.status(400).send({ error: 'validation', message: `status must be one of: ${STATUSES.join(', ')}` });
+      }
 
       const updates: string[] = [];
       const values: any[] = [];
@@ -190,9 +218,9 @@ export async function orgMemberRoutes(app: FastifyInstance) {
          FROM org_members om
          JOIN users u ON u.id = om.user_id
          WHERE om.id = ?`
-      ).get(memberId);
+      ).get(memberId) as any;
 
-      return { data: updated };
+      return { data: withoutOthersGatewayToken(updated, request.currentUser!.id) };
     }
   );
 

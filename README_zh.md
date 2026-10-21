@@ -159,7 +159,8 @@ docker compose up -d
 | `NEXT_PUBLIC_SUPPORT_EMAIL` | 顯示於設定頁面的客服信箱                                                              | —                       |
 | `DATABASE_PATH`             | SQLite 檔案路徑                                                                       | `./data/db.sqlite`      |
 | `CORS_ORIGIN`               | API 允許的來源                                                                        | `http://localhost:3000` |
-| `DOCKER_NETWORK`            | Docker 網路名稱                                                                       | `clawhuddle-net`        |
+| `DOCKER_NETWORK`            | 平台服務（Traefik、web、API）使用的 Docker 網路                                       | `clawhuddle-net`        |
+| `GATEWAY_NETWORK`           | 每位成員閘道使用的 Docker 網路，只與 Traefik 和 claw-proxy 共用                        | `clawhuddle-gateways`   |
 | `DOMAIN`                    | 正式環境網域（Traefik 用）                                                            | `localhost`             |
 | `GATEWAY_DOMAIN`            | 每位使用者閘道的子網域基礎（例如 `gw.company.com` → `alice.gw.company.com`）         | —                       |
 | `HOST_DATA_DIR`             | 主機上 Docker bind mount 的絕對路徑。預設為 `$PWD/data`，資料目錄不同時才需要覆蓋。  | —                       |

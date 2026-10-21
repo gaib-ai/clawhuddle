@@ -141,6 +141,48 @@ export async function orgGatewayRoutes(app: FastifyInstance) {
     }
   );
 
+  // Hand an admin the credentials to open a member's Control UI. Gateway tokens
+  // are never part of the members list; they are only released here, one member
+  // at a time, on an explicit request that is logged. Admins can't open an
+  // owner's gateway (same rule as role changes); owners can open any.
+  app.get<{ Params: { orgId: string; memberId: string } }>(
+    '/api/orgs/:orgId/gateways/members/:memberId/access',
+    { preHandler: requireRole('owner', 'admin') },
+    async (request, reply) => {
+      const { orgId, memberId } = request.params;
+      const db = getDb();
+      const member = db
+        .prepare(
+          'SELECT user_id, role, gateway_token, gateway_subdomain, gateway_port FROM org_members WHERE id = ? AND org_id = ?',
+        )
+        .get(memberId, orgId) as
+        | { user_id: string; role: string; gateway_token: string | null; gateway_subdomain: string | null; gateway_port: number | null }
+        | undefined;
+      if (!member) {
+        return reply.status(404).send({ error: 'not_found', message: 'Member not found' });
+      }
+      if (member.role === 'owner' && request.orgMember!.role !== 'owner') {
+        return reply.status(403).send({ error: 'forbidden', message: "Only owners can open an owner's gateway" });
+      }
+      if (!member.gateway_token) {
+        return reply.status(400).send({ error: 'gateway_error', message: 'No gateway deployed' });
+      }
+
+      request.log.info(
+        { orgId, memberId, targetUserId: member.user_id, adminUserId: request.currentUser!.id },
+        'admin opened member gateway',
+      );
+      reply.header('Cache-Control', 'no-store');
+      return {
+        data: {
+          gateway_token: member.gateway_token,
+          gateway_subdomain: member.gateway_subdomain,
+          gateway_port: member.gateway_port,
+        },
+      };
+    }
+  );
+
   // Get gateway status
   app.get<{ Params: { orgId: string; memberId: string } }>(
     '/api/orgs/:orgId/gateways/members/:memberId/status',

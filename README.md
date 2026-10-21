@@ -97,6 +97,8 @@ Edit `.env` with your values:
 # Auth
 NEXTAUTH_URL=http://localhost:3000
 NEXTAUTH_SECRET=change-me-to-random-secret
+# Signs web→API tokens; must be identical for web and api (openssl rand -hex 32)
+API_AUTH_SECRET=
 
 # LLM API key (at least one provider required)
 ANTHROPIC_API_KEY=sk-ant-...
@@ -147,6 +149,7 @@ This starts Traefik, the web frontend, the API server, and builds the gateway ba
 | --------------------------- | ------------------------------------------------------------------- | ----------------------- |
 | `NEXTAUTH_URL`              | Frontend URL                                                        | `http://localhost:3000` |
 | `NEXTAUTH_SECRET`           | Session encryption secret                                           | **(required)**          |
+| `API_AUTH_SECRET`           | Signs the short-lived tokens the web app uses to call the API (≥ 32 chars; web and api must match) | **(required)** |
 | `GOOGLE_CLIENT_ID`          | Google OAuth client ID                                              | —                       |
 | `GOOGLE_CLIENT_SECRET`      | Google OAuth client secret                                          | —                       |
 | `ALLOWED_DOMAIN`            | Restrict sign-in to email domain(s), comma-separated (e.g. `company.com,partner.com`) | — |
@@ -159,7 +162,8 @@ This starts Traefik, the web frontend, the API server, and builds the gateway ba
 | `NEXT_PUBLIC_SUPPORT_EMAIL` | Support email shown in the settings page                            | —                       |
 | `DATABASE_PATH`             | SQLite file path                                                    | `./data/db.sqlite`      |
 | `CORS_ORIGIN`               | Allowed origin for API requests                                     | `http://localhost:3000` |
-| `DOCKER_NETWORK`            | Docker network name                                                 | `clawhuddle-net`        |
+| `DOCKER_NETWORK`            | Docker network for platform services (Traefik, web, API)            | `clawhuddle-net`        |
+| `GATEWAY_NETWORK`           | Docker network for per-member gateways, shared only with Traefik and claw-proxy | `clawhuddle-gateways` |
 | `DOMAIN`                    | Production domain (used by Traefik)                                 | `localhost`             |
 | `GATEWAY_DOMAIN`            | Domain for per-user gateway subdomains (e.g. `gw.company.com` → `alice.gw.company.com`) | — |
 | `HOST_DATA_DIR`             | Absolute path on host for Docker bind mounts. Defaults to `$PWD/data`. Override if your data dir is elsewhere. | — |

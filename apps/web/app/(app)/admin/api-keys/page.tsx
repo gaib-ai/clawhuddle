@@ -36,7 +36,6 @@ export default function ApiKeysPage() {
     try {
       await apiFetch(`/api/orgs/${currentOrgId}`, {
         method: 'PATCH',
-        headers: { 'x-user-id': userId, 'Content-Type': 'application/json' },
         body: JSON.stringify({ primary_provider: value === '' ? null : value }),
       });
       await refreshOrgs();

@@ -2,11 +2,14 @@ import { FastifyInstance } from 'fastify';
 import { getDb } from '../db/index.js';
 import { v4 as uuid } from 'uuid';
 import type { AcceptInviteRequest } from '@clawhuddle/shared';
+import { authPlugin, requireInternal } from '../middleware/auth.js';
+import { ROLES } from './org/members.js';
 
 export async function authRoutes(app: FastifyInstance) {
-  // Check if an email is allowed to sign in (public — called by NextAuth signIn callback)
+  // Check if an email is allowed to sign in (internal — called by NextAuth signIn callback)
   app.get<{ Querystring: { email: string } }>(
     '/api/auth/check-access',
+    { preHandler: requireInternal },
     async (request, reply) => {
       const { email } = request.query;
       if (!email) {
@@ -34,9 +37,10 @@ export async function authRoutes(app: FastifyInstance) {
     }
   );
 
-  // Called by NextAuth on login to sync user
+  // Called by NextAuth on login to sync user (internal — it returns any user's id by email)
   app.post<{ Body: { email: string; name?: string; avatar_url?: string } }>(
     '/api/auth/login',
+    { preHandler: requireInternal },
     async (request, reply) => {
       const { email, name, avatar_url } = request.body;
       if (!email) {
@@ -115,86 +119,96 @@ export async function authRoutes(app: FastifyInstance) {
     };
   });
 
-  // Get current user info + org list
-  app.get('/api/auth/me', async (request, reply) => {
-    const userId = request.headers['x-user-id'] as string;
-    if (!userId) {
-      return reply.status(401).send({ error: 'unauthorized', message: 'Not authenticated' });
-    }
+  // Routes for a signed-in user (bearer API token required)
+  await app.register(async function authedRoutes(authed) {
+    await authed.register(authPlugin);
 
-    const db = getDb();
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
-    if (!user) {
-      return reply.status(404).send({ error: 'not_found', message: 'User not found' });
-    }
-
-    const orgs = db.prepare(
-      `SELECT o.id, o.name, o.slug, o.tier, o.created_at, om.role as member_role
-       FROM organizations o
-       JOIN org_members om ON om.org_id = o.id
-       WHERE om.user_id = ? AND om.status = 'active'
-       ORDER BY o.name`
-    ).all(userId);
-
-    return { data: { ...user, orgs } };
-  });
-
-  // Accept invitation by token
-  app.post<{ Body: AcceptInviteRequest }>(
-    '/api/invitations/accept',
-    async (request, reply) => {
-      const userId = request.headers['x-user-id'] as string;
-      if (!userId) {
-        return reply.status(401).send({ error: 'unauthorized', message: 'Not authenticated' });
-      }
-
-      const { token } = request.body;
-      if (!token) {
-        return reply.status(400).send({ error: 'validation', message: 'token is required' });
-      }
+    // Get current user info + org list
+    authed.get('/api/auth/me', async (request) => {
+      const user = request.currentUser!;
+      const userId = user.id;
 
       const db = getDb();
-      const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as any;
-      if (!user) {
-        return reply.status(404).send({ error: 'not_found', message: 'User not found' });
-      }
 
-      const invitation = db.prepare(
-        "SELECT * FROM invitations WHERE token = ? AND status = 'pending'"
-      ).get(token) as any;
+      const orgs = db.prepare(
+        `SELECT o.id, o.name, o.slug, o.tier, o.created_at, om.role as member_role
+         FROM organizations o
+         JOIN org_members om ON om.org_id = o.id
+         WHERE om.user_id = ? AND om.status = 'active'
+         ORDER BY o.name`
+      ).all(userId);
 
-      if (!invitation) {
-        return reply.status(404).send({ error: 'not_found', message: 'Invitation not found or already used' });
-      }
+      return { data: { ...user, orgs } };
+    });
 
-      if (new Date(invitation.expires_at) < new Date()) {
-        db.prepare("UPDATE invitations SET status = 'expired' WHERE id = ?").run(invitation.id);
-        return reply.status(410).send({ error: 'expired', message: 'Invitation has expired' });
-      }
+    // Accept invitation by token
+    authed.post<{ Body: AcceptInviteRequest }>(
+      '/api/invitations/accept',
+      async (request, reply) => {
+        const user = request.currentUser!;
+        const userId = user.id;
 
-      if (invitation.email !== user.email) {
-        return reply.status(403).send({ error: 'forbidden', message: 'Invitation is for a different email' });
-      }
+        const { token } = request.body;
+        if (!token) {
+          return reply.status(400).send({ error: 'validation', message: 'token is required' });
+        }
 
-      // Check if already a member
-      const existing = db.prepare(
-        'SELECT id FROM org_members WHERE org_id = ? AND user_id = ?'
-      ).get(invitation.org_id, userId);
+        const db = getDb();
+        const invitation = db.prepare(
+          "SELECT * FROM invitations WHERE token = ? AND status = 'pending'"
+        ).get(token) as any;
 
-      if (existing) {
+        if (!invitation) {
+          return reply.status(404).send({ error: 'not_found', message: 'Invitation not found or already used' });
+        }
+
+        if (new Date(invitation.expires_at) < new Date()) {
+          db.prepare("UPDATE invitations SET status = 'expired' WHERE id = ?").run(invitation.id);
+          return reply.status(410).send({ error: 'expired', message: 'Invitation has expired' });
+        }
+
+        if (invitation.email !== user.email) {
+          return reply.status(403).send({ error: 'forbidden', message: 'Invitation is for a different email' });
+        }
+
+        // Re-check the invite now, not just when it was sent: invitations from
+        // before roles were validated can carry any role (including owner from an
+        // admin), and the inviter may since have been demoted or removed. The
+        // inviter must still be allowed to send this invite: an active owner or
+        // admin, and an owner for owner invites.
+        const inviter = db.prepare(
+          "SELECT role FROM org_members WHERE org_id = ? AND user_id = ? AND status = 'active'"
+        ).get(invitation.org_id, invitation.invited_by) as { role: string } | undefined;
+        const inviterCanInvite =
+          inviter?.role === 'owner' || (inviter?.role === 'admin' && invitation.role !== 'owner');
+        if (!ROLES.includes(invitation.role) || !inviterCanInvite) {
+          db.prepare("UPDATE invitations SET status = 'expired' WHERE id = ?").run(invitation.id);
+          return reply.status(403).send({
+            error: 'forbidden',
+            message: 'This invitation is no longer valid. Ask an owner of the organization to invite you again.',
+          });
+        }
+
+        // Check if already a member
+        const existing = db.prepare(
+          'SELECT id FROM org_members WHERE org_id = ? AND user_id = ?'
+        ).get(invitation.org_id, userId);
+
+        if (existing) {
+          db.prepare("UPDATE invitations SET status = 'accepted' WHERE id = ?").run(invitation.id);
+          return { data: { org_id: invitation.org_id, already_member: true } };
+        }
+
+        // Create membership
+        const memberId = uuid();
+        db.prepare(
+          'INSERT INTO org_members (id, org_id, user_id, role) VALUES (?, ?, ?, ?)'
+        ).run(memberId, invitation.org_id, userId, invitation.role);
+
         db.prepare("UPDATE invitations SET status = 'accepted' WHERE id = ?").run(invitation.id);
-        return { data: { org_id: invitation.org_id, already_member: true } };
+
+        return { data: { org_id: invitation.org_id, member_id: memberId } };
       }
-
-      // Create membership
-      const memberId = uuid();
-      db.prepare(
-        'INSERT INTO org_members (id, org_id, user_id, role) VALUES (?, ?, ?, ?)'
-      ).run(memberId, invitation.org_id, userId, invitation.role);
-
-      db.prepare("UPDATE invitations SET status = 'accepted' WHERE id = ?").run(invitation.id);
-
-      return { data: { org_id: invitation.org_id, member_id: memberId } };
-    }
-  );
+    );
+  });
 }

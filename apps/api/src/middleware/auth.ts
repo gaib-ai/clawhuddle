@@ -1,6 +1,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import fp from 'fastify-plugin';
 import { getDb } from '../db/index.js';
+import { assertApiAuthSecret, verifyApiToken, type ApiTokenAudience } from '@clawhuddle/shared';
 import type { User, OrgMember } from '@clawhuddle/shared';
 
 // Extend Fastify request with our custom properties
@@ -12,12 +13,32 @@ declare module 'fastify' {
   }
 }
 
-// Plugin: verifies x-user-id header, decorates request.currentUser
+/** Shared secret the web app signs API tokens with. Checked once at startup (index.ts). */
+export function getApiAuthSecret(): string {
+  const secret = process.env.API_AUTH_SECRET;
+  assertApiAuthSecret(secret);
+  return secret;
+}
+
+function bearerToken(request: FastifyRequest): string | null {
+  const header = request.headers.authorization;
+  if (!header?.startsWith('Bearer ')) return null;
+  return header.slice('Bearer '.length).trim() || null;
+}
+
+async function verifiedSubject(request: FastifyRequest, aud: ApiTokenAudience): Promise<string | null> {
+  const token = bearerToken(request);
+  if (!token) return null;
+  const claims = await verifyApiToken(token, aud, getApiAuthSecret());
+  return claims?.sub ?? null;
+}
+
+// Plugin: verifies the bearer API token minted by the web app, decorates request.currentUser
 export const authPlugin = fp(async (app: FastifyInstance) => {
   app.decorateRequest('currentUser', undefined);
 
   app.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
-    const userId = request.headers['x-user-id'] as string;
+    const userId = await verifiedSubject(request, 'user');
     if (!userId) {
       return reply.status(401).send({ error: 'unauthorized', message: 'Not authenticated' });
     }
@@ -35,6 +56,13 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
     request.currentUser = user;
   });
 });
+
+// Prehandler: only the web server (holding API_AUTH_SECRET) may call internal routes
+export async function requireInternal(request: FastifyRequest, reply: FastifyReply) {
+  if (!(await verifiedSubject(request, 'internal'))) {
+    return reply.status(401).send({ error: 'unauthorized', message: 'Internal endpoint' });
+  }
+}
 
 // Plugin: extracts :orgId from URL, validates membership, decorates request.orgId + request.orgMember
 // Must be registered AFTER authPlugin (it depends on request.currentUser)
