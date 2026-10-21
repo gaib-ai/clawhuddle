@@ -29,7 +29,7 @@ The API never trusts a client-supplied user id. Both apps share `API_AUTH_SECRET
 - Gateways run agent-controlled code (and anyone who can message them can steer it). They live on `GATEWAY_NETWORK` (`clawhuddle-gateways`) with only Traefik and claw-proxy; the API and web stay on `clawhuddle-net`.
 - Slack defaults to OpenClaw's own policy (`dmPolicy: pairing`, `groupPolicy: allowlist`, `allowBots: false`). `mergeOpenClawConfig` migrates blocks still carrying the old wide-open platform default; blocks the member changed are left alone.
 - Port-forward Traefik files are written with `JSON.stringify` (JSON is valid YAML) — never interpolate request input into them.
-- Only owners can grant the owner role, including through invitations; roles and statuses are validated against fixed lists.
+- Only owners can grant the owner role, including through invitations (checked when sent and again when accepted); roles and statuses are validated against fixed lists.
 
 ## Claw Proxy Integration
 

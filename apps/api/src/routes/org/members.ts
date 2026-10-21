@@ -18,7 +18,7 @@ function withoutOthersGatewayToken<T extends { user_id: string; gateway_token?: 
   return member.user_id === viewerUserId ? member : { ...member, gateway_token: null };
 }
 
-const ROLES = ['owner', 'admin', 'member'];
+export const ROLES = ['owner', 'admin', 'member'];
 const STATUSES = ['active', 'disabled'];
 
 export async function orgMemberRoutes(app: FastifyInstance) {

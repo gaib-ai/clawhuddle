@@ -17,6 +17,7 @@ const ORG = 'org-1';
 const OWNER = { id: 'user-owner', email: 'owner@example.com' };
 const ADMIN = { id: 'user-admin', email: 'admin@example.com' };
 const MEMBER = { id: 'user-member', email: 'member@example.com' };
+const INVITEE = { id: 'user-invitee', email: 'invitee@example.com' };
 
 let tmpDir: string;
 let app: FastifyInstance;
@@ -41,6 +42,7 @@ beforeAll(async () => {
   db.exec(fs.readFileSync(path.join(here, '../../db/schema.sql'), 'utf-8'));
   db.exec(fs.readFileSync(path.join(here, '../../db/migrations/015-port-forwards.sql'), 'utf-8'));
   db.prepare('INSERT INTO organizations (id, name, slug) VALUES (?, ?, ?)').run(ORG, 'Org', 'org');
+  db.prepare('INSERT INTO users (id, email) VALUES (?, ?)').run(INVITEE.id, INVITEE.email);
   for (const [u, role] of [[OWNER, 'owner'], [ADMIN, 'admin'], [MEMBER, 'member']] as const) {
     db.prepare('INSERT INTO users (id, email) VALUES (?, ?)').run(u.id, u.email);
     db.prepare('INSERT INTO org_members (id, org_id, user_id, role) VALUES (?, ?, ?, ?)').run(
@@ -48,10 +50,12 @@ beforeAll(async () => {
     );
   }
 
+  const { authRoutes } = await import('../auth.js');
   const { orgPlugin } = await import('../../middleware/auth.js');
   const { orgMemberRoutes } = await import('./members.js');
   const { orgPortForwardRoutes } = await import('./port-forwards.js');
   app = Fastify();
+  await app.register(authRoutes);
   await app.register(async (instance) => {
     await instance.register(orgPlugin);
     await instance.register(orgMemberRoutes);
@@ -144,5 +148,41 @@ describe('member roles', () => {
   it('rejects unknown statuses', async () => {
     expect((await update(ADMIN, { status: 'banned' })).statusCode).toBe(400);
     expect((await update(ADMIN, { status: 'disabled' })).statusCode).toBe(200);
+  });
+});
+
+describe('accepting invitations', () => {
+  // Rows written straight to the DB stand in for invitations sent before the
+  // invite endpoint validated roles.
+  const pendingInvite = async (invitedBy: { id: string }, role: string) => {
+    const { getDb } = await import('../../db/index.js');
+    const token = `tok-${invitedBy.id}-${role}`;
+    getDb()
+      .prepare(
+        "INSERT INTO invitations (id, org_id, email, role, token, invited_by, expires_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+1 day'))",
+      )
+      .run(`inv-${token}`, ORG, INVITEE.email, role, token, invitedBy.id);
+    return token;
+  };
+  const accept = async (token: string) =>
+    app.inject({ method: 'POST', url: '/api/invitations/accept', headers: await as(INVITEE), payload: { token } });
+
+  it("refuses an owner invitation an admin sent before roles were validated", async () => {
+    const res = await accept(await pendingInvite(ADMIN, 'owner'));
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('refuses an invitation with an unknown role', async () => {
+    expect((await accept(await pendingInvite(OWNER, 'superadmin'))).statusCode).toBe(403);
+  });
+
+  it("honours an owner's owner invitation", async () => {
+    const res = await accept(await pendingInvite(OWNER, 'owner'));
+    expect(res.statusCode).toBe(200);
+    const { getDb } = await import('../../db/index.js');
+    const row = getDb()
+      .prepare('SELECT role FROM org_members WHERE org_id = ? AND user_id = ?')
+      .get(ORG, INVITEE.id) as { role: string };
+    expect(row.role).toBe('owner');
   });
 });

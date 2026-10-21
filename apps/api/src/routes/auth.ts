@@ -3,6 +3,7 @@ import { getDb } from '../db/index.js';
 import { v4 as uuid } from 'uuid';
 import type { AcceptInviteRequest } from '@clawhuddle/shared';
 import { authPlugin, requireInternal } from '../middleware/auth.js';
+import { ROLES } from './org/members.js';
 
 export async function authRoutes(app: FastifyInstance) {
   // Check if an email is allowed to sign in (internal — called by NextAuth signIn callback)
@@ -168,6 +169,20 @@ export async function authRoutes(app: FastifyInstance) {
 
         if (invitation.email !== user.email) {
           return reply.status(403).send({ error: 'forbidden', message: 'Invitation is for a different email' });
+        }
+
+        // Re-check the role now, not just when the invite was sent: invitations
+        // from before roles were validated can carry any role, including owner
+        // from an admin, and an inviter may have been demoted since.
+        const inviter = db.prepare(
+          "SELECT role FROM org_members WHERE org_id = ? AND user_id = ? AND status = 'active'"
+        ).get(invitation.org_id, invitation.invited_by) as { role: string } | undefined;
+        if (!ROLES.includes(invitation.role) || (invitation.role === 'owner' && inviter?.role !== 'owner')) {
+          db.prepare("UPDATE invitations SET status = 'expired' WHERE id = ?").run(invitation.id);
+          return reply.status(403).send({
+            error: 'forbidden',
+            message: 'This invitation is no longer valid. Ask an owner of the organization to invite you again.',
+          });
         }
 
         // Check if already a member
