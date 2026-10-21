@@ -339,6 +339,9 @@ export function generateOpenClawConfig(options: {
         // lists <provider>/<model> ids, though the prefixed forms still route).
         // Tracks the newest Opus — 5.5 as of 2026-10-14; 1M context, $4/$20 per 1M.
         { id: 'claude-opus-latest', name: 'Claude Opus (latest)', reasoning: true, input: ['text', 'image'], cost: { input: 4, output: 20, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000000, maxTokens: 32000, compat: kioskCompat },
+        // Token Router promotion routed through the kiosk (added 2026-10-21):
+        // free tier, text only, 1M context, 8192 max completion per the kiosk catalog.
+        { id: 'minimax-m3.1-flash:free', name: 'MiniMax M3.1 Flash (free)', input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000000, maxTokens: 8192, compat: kioskCompat },
       ],
     };
   }

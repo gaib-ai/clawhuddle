@@ -188,6 +188,7 @@ export const PROVIDERS: ProviderConfig[] = [
       { id: 'tokenkiosk/bedrock/kimi-k2.5', label: 'AWS Bedrock Kimi K2.5' },
       { id: 'tokenkiosk/bedrock/kimi-k2-thinking', label: 'AWS Bedrock Kimi K2 Thinking' },
       { id: 'tokenkiosk/claude-opus-latest', label: 'Claude Opus (latest)' },
+      { id: 'tokenkiosk/minimax-m3.1-flash:free', label: 'MiniMax M3.1 Flash (free)' },
     ],
   },
   {
