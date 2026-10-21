@@ -33,6 +33,27 @@ RUN brew install gh gogcli && brew cleanup -s && rm -rf /home/linuxbrew/.cache/H
 ENV GH_CONFIG_DIR=/root/.openclaw/gh \
     GOG_HOME=/root/.openclaw/gog
 RUN npm install -g openclaw@2026.10.3
+# Chromium for OpenClaw's browser tool. OpenClaw drives it over CDP through the
+# playwright-core it bundles, so install the matching build with that CLI (same
+# step as the official image's OPENCLAW_INSTALL_BROWSER). It lives inside the
+# image, not the mounted state dir: a browser a member installs at runtime is
+# wiped on every redeploy. /usr/bin/chromium is a stable path for
+# browser.executablePath. The gateway runs as root, so members need
+# browser.noSandbox=true (and headless=true; there is no display — Xvfb is here
+# only for headed one-shots).
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb \
+    && mkdir -p "$PLAYWRIGHT_BROWSERS_PATH" \
+    && node /usr/local/lib/node_modules/openclaw/node_modules/playwright-core/cli.js install --with-deps chromium \
+    && ln -s "$(find "$PLAYWRIGHT_BROWSERS_PATH" -type f -name chrome -path '*chrome-linux*' | head -1)" /usr/bin/chromium \
+    && /usr/bin/chromium --version \
+    && rm -rf /var/lib/apt/lists/*
+# ntn — the official Notion CLI the bundled `notion` skill prefers (it falls
+# back to curl without it). Baked in because an `npm install -g` done at
+# runtime lands in the container fs and is wiped on redeploy. The token comes
+# from the member's secret store (skills.entries.notion.apiKey SecretRef).
+RUN npm install -g ntn@0.23.21
 # Default the Control UI language to English (see patch-control-ui.sh).
 COPY patch-control-ui.sh /patch-control-ui.sh
 RUN sh /patch-control-ui.sh && rm /patch-control-ui.sh
