@@ -2,16 +2,6 @@
 # The floating node:24 tag would satisfy that today but is not reproducible.
 FROM node:24.18
 RUN apt-get update && apt-get install -y git socat && rm -rf /var/lib/apt/lists/*
-# GitHub CLI for agents, from GitHub's apt repo (Debian's own gh is years old).
-# Pinned; bump deliberately. Its config (incl. auth written by `gh auth login`)
-# lives under the mounted state dir so it survives a redeploy — nothing outside
-# /root/.openclaw does.
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-      -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-      > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update && apt-get install -y gh=2.101.0 && rm -rf /var/lib/apt/lists/*
-ENV GH_CONFIG_DIR=/root/.openclaw/gh
 # Homebrew (Linuxbrew). Homebrew refuses to run as root and the gateway runs
 # as root, so it is installed under a dedicated `linuxbrew` user and exposed
 # through a /usr/local/bin/brew wrapper that re-executes as that user via sudo.
@@ -32,12 +22,16 @@ RUN apt-get update && apt-get install -y build-essential procps curl file sudo \
 # brew binary, and apt-installed tools keep precedence over formulae.
 ENV PATH=$PATH:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin \
     HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1
+# gh — GitHub CLI for agents. Its config (incl. auth written by `gh auth login`)
+# lives under the mounted state dir so it survives a redeploy — nothing outside
+# /root/.openclaw does. Homebrew installs the formula current at build time.
 # gog — Google Workspace CLI (Drive/Gmail/Calendar/...) with OAuth, by the
 # OpenClaw author. Its config (OAuth client + per-account refresh tokens) is
 # rooted at GOG_HOME, pointed into the mounted state dir so logins survive a
 # redeploy. Pair with the ClawHub skill @steipete/gog so agents know the CLI.
-RUN brew install gogcli && brew cleanup -s && rm -rf /home/linuxbrew/.cache/Homebrew
-ENV GOG_HOME=/root/.openclaw/gog
+RUN brew install gh gogcli && brew cleanup -s && rm -rf /home/linuxbrew/.cache/Homebrew
+ENV GH_CONFIG_DIR=/root/.openclaw/gh \
+    GOG_HOME=/root/.openclaw/gog
 RUN npm install -g openclaw@2026.10.3
 # Default the Control UI language to English (see patch-control-ui.sh).
 COPY patch-control-ui.sh /patch-control-ui.sh
