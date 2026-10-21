@@ -88,6 +88,10 @@ const SLACK_ACCESS = {
  * mergeOpenClawConfig leaves an existing channel block to the member, so those
  * gateways would stay open forever. A block that still carries exactly that
  * platform default is moved to SLACK_ACCESS; one the member changed is theirs.
+ *
+ * This is a one-time migration: gateway.ts asks for it only on a gateway's
+ * first merge (org_members.slack_access_migrated_at), so a member who later
+ * opens Slack on purpose — even to exactly the old default — keeps it.
  */
 function lockDownLegacyOpenSlack(slack: Record<string, unknown>): void {
   const allowFrom = slack.allowFrom;
@@ -446,6 +450,7 @@ export function generateOpenClawConfig(options: {
 export function mergeOpenClawConfig(
   existing: Record<string, unknown>,
   options: Parameters<typeof generateOpenClawConfig>[0],
+  { lockDownLegacySlack = true }: { lockDownLegacySlack?: boolean } = {},
 ): OpenClawConfig {
   const generated = generateOpenClawConfig(options);
 
@@ -528,7 +533,7 @@ export function mergeOpenClawConfig(
   // Runs whether or not the member still has a Slack token with us: removing it
   // leaves the block (and its tokens) in place, still answering on Slack.
   const slack = (merged.channels as Record<string, unknown> | undefined)?.slack;
-  if (slack && typeof slack === 'object' && !Array.isArray(slack)) {
+  if (lockDownLegacySlack && slack && typeof slack === 'object' && !Array.isArray(slack)) {
     lockDownLegacyOpenSlack(slack as Record<string, unknown>);
   }
 

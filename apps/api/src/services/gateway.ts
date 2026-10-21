@@ -108,6 +108,24 @@ function getMember(
   return member;
 }
 
+// The legacy-open Slack lockdown in mergeOpenClawConfig runs once per gateway:
+// after its first merge the Slack block is the member's, even if they later set
+// it back to exactly the old platform default.
+function slackAccessMigrated(memberId: string): boolean {
+  const row = getDb()
+    .prepare("SELECT slack_access_migrated_at FROM org_members WHERE id = ?")
+    .get(memberId) as { slack_access_migrated_at: string | null } | undefined;
+  return !!row?.slack_access_migrated_at;
+}
+
+function markSlackAccessMigrated(memberId: string): void {
+  getDb()
+    .prepare(
+      "UPDATE org_members SET slack_access_migrated_at = COALESCE(slack_access_migrated_at, datetime('now')) WHERE id = ?",
+    )
+    .run(memberId);
+}
+
 function getMemberSkills(orgId: string, userId: string): Skill[] {
   const db = getDb();
   return db
@@ -490,14 +508,16 @@ function regenerateGatewayConfig(orgId: string, userId: string): boolean {
   };
 
   const configPath = path.join(gatewayDir, 'openclaw.json');
+  const lockDownLegacySlack = !slackAccessMigrated(member.id);
   let config;
   try {
     const existing = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    config = mergeOpenClawConfig(existing, configOptions);
+    config = mergeOpenClawConfig(existing, configOptions, { lockDownLegacySlack });
   } catch {
     config = generateOpenClawConfig(configOptions);
   }
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+  markSlackAccessMigrated(member.id);
   return true;
 }
 
@@ -646,10 +666,12 @@ export async function provisionGateway(orgId: string, memberId: string) {
   // Install skill directories (still keyed by userId for filesystem)
   await installSkillsForUser(path.join(orgId, member.user_id), skills);
 
-  // Update DB with provisioning status + token + subdomain
+  // Update DB with provisioning status + token + subdomain. A fresh config
+  // already has the locked-down Slack defaults, so there is nothing to migrate.
   db.prepare(
     "UPDATE org_members SET gateway_port = ?, gateway_status = ?, gateway_token = ?, gateway_subdomain = ? WHERE id = ?",
   ).run(port, "provisioning", token, subdomain, memberId);
+  markSlackAccessMigrated(memberId);
 
   try {
     // Create and start Docker container
@@ -835,14 +857,16 @@ export async function redeployGateway(orgId: string, memberId: string) {
 
   // Merge into existing config to preserve user customizations;
   // fall back to fresh generation if no existing config is found.
+  const lockDownLegacySlack = !slackAccessMigrated(memberId);
   let config;
   try {
     const existing = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-    config = mergeOpenClawConfig(existing, configOptions);
+    config = mergeOpenClawConfig(existing, configOptions, { lockDownLegacySlack });
   } catch {
     config = generateOpenClawConfig(configOptions);
   }
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+  markSlackAccessMigrated(memberId);
 
   // Install skill directories
   await installSkillsForUser(path.join(orgId, member.user_id), skills);

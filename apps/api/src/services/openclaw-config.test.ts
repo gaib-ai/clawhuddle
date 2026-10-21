@@ -107,6 +107,13 @@ describe('Slack access (2026-10-21)', () => {
     const slack = mergeOpenClawConfig(existing as unknown as MergeInput, withSlack).channels!.slack!;
     expect(slack).toMatchObject({ dmPolicy: 'allowlist', allowFrom: ['U123'], groupPolicy: 'open', allowBots: true });
   });
+
+  it('leaves even the old default alone when the lockdown has already run', () => {
+    const existing = { ...generateOpenClawConfig(withSlack), channels: { slack: legacyOpenSlack() } };
+    const slack = mergeOpenClawConfig(existing as unknown as MergeInput, withSlack, { lockDownLegacySlack: false })
+      .channels!.slack!;
+    expect(slack).toMatchObject({ dmPolicy: 'open', allowFrom: ['*'], groupPolicy: 'open', allowBots: true });
+  });
 });
 
 describe('mergeOpenClawConfig meta handling', () => {
