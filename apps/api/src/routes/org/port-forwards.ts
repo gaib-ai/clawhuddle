@@ -6,10 +6,23 @@ import {
   writePortForwardConfig,
   removePortForwardConfig,
   portForwardHostname,
+  reservedSubdomainReason,
   type PortForward,
 } from '../../services/port-forward.js';
 
 const SUBDOMAIN_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const MAX_DESCRIPTION_LENGTH = 200;
+
+/** Error message for an invalid description, or null. Control characters (incl. newlines) are rejected. */
+function descriptionProblem(description: unknown): string | null {
+  if (description === undefined || description === null) return null;
+  if (typeof description !== 'string') return 'Description must be a string';
+  if (description.length > MAX_DESCRIPTION_LENGTH) {
+    return `Description must be at most ${MAX_DESCRIPTION_LENGTH} characters`;
+  }
+  if (/[\u0000-\u001f\u007f]/.test(description)) return 'Description must be a single line of text';
+  return null;
+}
 
 export async function orgPortForwardRoutes(app: FastifyInstance) {
   // List port forwards (admin+ only)
@@ -50,6 +63,14 @@ export async function orgPortForwardRoutes(app: FastifyInstance) {
           error: 'validation',
           message: 'Subdomain must be lowercase letters, digits and hyphens (max 63 chars)',
         });
+      }
+      const reserved = reservedSubdomainReason(normalized);
+      if (reserved) {
+        return reply.status(400).send({ error: 'validation', message: reserved });
+      }
+      const descriptionError = descriptionProblem(description);
+      if (descriptionError) {
+        return reply.status(400).send({ error: 'validation', message: descriptionError });
       }
       const portNum = Number(port);
       if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
@@ -133,6 +154,10 @@ export async function orgPortForwardRoutes(app: FastifyInstance) {
             message: 'Subdomain must be lowercase letters, digits and hyphens (max 63 chars)',
           });
         }
+        const reserved = reservedSubdomainReason(normalized);
+        if (reserved) {
+          return reply.status(400).send({ error: 'validation', message: reserved });
+        }
         const conflictForward = db
           .prepare('SELECT id FROM port_forwards WHERE subdomain = ? AND id != ?')
           .get(normalized, forwardId);
@@ -154,6 +179,10 @@ export async function orgPortForwardRoutes(app: FastifyInstance) {
       }
 
       if (description !== undefined) {
+        const descriptionError = descriptionProblem(description);
+        if (descriptionError) {
+          return reply.status(400).send({ error: 'validation', message: descriptionError });
+        }
         updated.description = description?.trim() || null;
       }
 

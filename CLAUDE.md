@@ -24,6 +24,13 @@ The API never trusts a client-supplied user id. Both apps share `API_AUTH_SECRET
 - **Internal tokens** (`aud: 'internal'`, 60s): the web server's calls to `/api/auth/login` and `/api/auth/check-access`, guarded by `requireInternal`. These routes return any user's id by email, so they must never be reachable without one.
 - `gateway_token` is a bearer credential: member responses only include it for the caller's own row. Admins get another member's token one at a time from `GET /api/orgs/:orgId/gateways/members/:memberId/access` (logged; admins can't open an owner's gateway, owners can open any).
 
+## Security Invariants
+
+- Gateways run agent-controlled code (and anyone who can message them can steer it). They live on `GATEWAY_NETWORK` (`clawhuddle-gateways`) with only Traefik and claw-proxy; the API and web stay on `clawhuddle-net`.
+- Slack defaults to OpenClaw's own policy (`dmPolicy: pairing`, `groupPolicy: allowlist`, `allowBots: false`). `mergeOpenClawConfig` migrates blocks still carrying the old wide-open platform default; blocks the member changed are left alone.
+- Port-forward Traefik files are written with `JSON.stringify` (JSON is valid YAML) — never interpolate request input into them.
+- Only owners can grant the owner role, including through invitations; roles and statuses are validated against fixed lists.
+
 ## Claw Proxy Integration
 
 claw-proxy routes OpenAI-format requests through `claude -p` CLI using Claude Max subscriptions. It registers as a **custom OpenClaw provider** (not env var override).

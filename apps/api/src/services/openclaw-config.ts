@@ -69,6 +69,45 @@ const SLACK_STREAMING: SlackStreaming = {
 };
 
 /**
+ * Who may reach a member's agent over Slack. The agent has a shell and the
+ * member's credentials, so it must not take turns from anyone in the workspace
+ * (Slack Connect guests included) or from other bots. These are OpenClaw's own
+ * defaults: unknown DM senders get a pairing code the member approves
+ * (`openclaw pairing approve slack <code>`, or POST /me/channels/slack/pair),
+ * and channels are ignored until the member allowlists them by channel ID.
+ */
+const SLACK_ACCESS = {
+  dmPolicy: 'pairing',
+  groupPolicy: 'allowlist',
+  allowBots: false,
+} as const;
+
+/**
+ * Generators before 2026-10-21 wrote Slack wide open: any DM sender
+ * (dmPolicy/dm.policy "open", allowFrom ["*"]), any channel, and other bots.
+ * mergeOpenClawConfig leaves an existing channel block to the member, so those
+ * gateways would stay open forever. A block that still carries exactly that
+ * platform default is moved to SLACK_ACCESS; one the member changed is theirs.
+ */
+function lockDownLegacyOpenSlack(slack: Record<string, unknown>): void {
+  const allowFrom = slack.allowFrom;
+  const isLegacyDefault =
+    slack.dmPolicy === 'open' &&
+    Array.isArray(allowFrom) && allowFrom.length === 1 && allowFrom[0] === '*' &&
+    slack.groupPolicy === 'open' &&
+    slack.allowBots === true;
+  if (!isLegacyDefault) return;
+
+  Object.assign(slack, SLACK_ACCESS);
+  delete slack.allowFrom;
+  const dm = slack.dm;
+  if (dm && typeof dm === 'object' && !Array.isArray(dm)) {
+    delete (dm as Record<string, unknown>).policy;
+    delete (dm as Record<string, unknown>).allowFrom;
+  }
+}
+
+/**
  * An entry in agents.defaults.models. `agentRuntime` binds the model to an
  * OpenClaw agent runtime, which then serves it from its linked account instead
  * of from models.providers[...].models[].
@@ -382,18 +421,14 @@ export function generateOpenClawConfig(options: {
       channelsCfg.discord = { enabled: true, botToken: ct.discord };
     }
     if (ct.slack?.botToken) {
-      // Slack DMs require Socket Mode (botToken + appToken) and dm.enabled.
+      // Slack DMs require Socket Mode (botToken + appToken).
       channelsCfg.slack = {
         enabled: true,
         mode: 'socket',
         botToken: ct.slack.botToken,
         ...(ct.slack.appToken ? { appToken: ct.slack.appToken } : {}),
-        groupPolicy: 'open',
-        allowBots: true,
+        ...SLACK_ACCESS,
         streaming: SLACK_STREAMING,
-        dmPolicy: 'open',
-        dm: { enabled: true, policy: 'open' },
-        allowFrom: ['*'],
       };
     }
     if (Object.keys(channelsCfg).length > 0) {
@@ -483,10 +518,18 @@ export function mergeOpenClawConfig(
       // block (tokens, allowlists and accounts stay theirs). Without this an
       // existing Slack block kept the `streaming: off` an older generator wrote.
       const existing = mergedChannels[channelId];
-      if (channelCfg.streaming && existing && typeof existing === 'object' && !Array.isArray(existing)) {
+      if (!existing || typeof existing !== 'object' || Array.isArray(existing)) continue;
+      if (channelCfg.streaming) {
         (existing as Record<string, unknown>).streaming = channelCfg.streaming;
       }
     }
+  }
+
+  // Runs whether or not the member still has a Slack token with us: removing it
+  // leaves the block (and its tokens) in place, still answering on Slack.
+  const slack = (merged.channels as Record<string, unknown> | undefined)?.slack;
+  if (slack && typeof slack === 'object' && !Array.isArray(slack)) {
+    lockDownLegacyOpenSlack(slack as Record<string, unknown>);
   }
 
   // Plugins: merge entries so user-added plugins (e.g. openai, anthropic)

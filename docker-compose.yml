@@ -20,6 +20,7 @@ services:
       - ./data/traefik-dynamic:/etc/traefik/dynamic:ro
     networks:
       - clawhuddle-net
+      - clawhuddle-gateways
     restart: unless-stopped
 
   web:
@@ -73,7 +74,7 @@ services:
       - EMAIL_FROM=${EMAIL_FROM:-}
       - APP_URL=${APP_URL:-http://localhost:3000}
       - SUPER_ADMIN_EMAIL=${SUPER_ADMIN_EMAIL:-}
-      - DOCKER_NETWORK=clawhuddle-net
+      - GATEWAY_NETWORK=clawhuddle-gateways
       - DOMAIN=${DOMAIN:-localhost}
       - GATEWAY_DOMAIN=${GATEWAY_DOMAIN:-}
       - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:3000}
@@ -103,7 +104,7 @@ services:
     volumes:
       - ./data/claw-proxy:/root/.claw-proxy:ro
     networks:
-      - clawhuddle-net
+      - clawhuddle-gateways
     restart: unless-stopped
     profiles:
       - proxy
@@ -118,5 +119,10 @@ services:
       - clawhuddle-net
 
 networks:
+  # Platform services: traefik, web, api
   clawhuddle-net:
     name: clawhuddle-net
+  # Per-member gateways (created by the API) plus what they must reach: traefik
+  # routes to them, claw-proxy serves them. The API and web are not on it.
+  clawhuddle-gateways:
+    name: clawhuddle-gateways

@@ -162,7 +162,8 @@ This starts Traefik, the web frontend, the API server, and builds the gateway ba
 | `NEXT_PUBLIC_SUPPORT_EMAIL` | Support email shown in the settings page                            | —                       |
 | `DATABASE_PATH`             | SQLite file path                                                    | `./data/db.sqlite`      |
 | `CORS_ORIGIN`               | Allowed origin for API requests                                     | `http://localhost:3000` |
-| `DOCKER_NETWORK`            | Docker network name                                                 | `clawhuddle-net`        |
+| `DOCKER_NETWORK`            | Docker network for platform services (Traefik, web, API)            | `clawhuddle-net`        |
+| `GATEWAY_NETWORK`           | Docker network for per-member gateways, shared only with Traefik and claw-proxy | `clawhuddle-gateways` |
 | `DOMAIN`                    | Production domain (used by Traefik)                                 | `localhost`             |
 | `GATEWAY_DOMAIN`            | Domain for per-user gateway subdomains (e.g. `gw.company.com` → `alice.gw.company.com`) | — |
 | `HOST_DATA_DIR`             | Absolute path on host for Docker bind mounts. Defaults to `$PWD/data`. Override if your data dir is elsewhere. | — |
