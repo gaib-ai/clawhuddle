@@ -171,13 +171,17 @@ export async function authRoutes(app: FastifyInstance) {
           return reply.status(403).send({ error: 'forbidden', message: 'Invitation is for a different email' });
         }
 
-        // Re-check the role now, not just when the invite was sent: invitations
-        // from before roles were validated can carry any role, including owner
-        // from an admin, and an inviter may have been demoted since.
+        // Re-check the invite now, not just when it was sent: invitations from
+        // before roles were validated can carry any role (including owner from an
+        // admin), and the inviter may since have been demoted or removed. The
+        // inviter must still be allowed to send this invite: an active owner or
+        // admin, and an owner for owner invites.
         const inviter = db.prepare(
           "SELECT role FROM org_members WHERE org_id = ? AND user_id = ? AND status = 'active'"
         ).get(invitation.org_id, invitation.invited_by) as { role: string } | undefined;
-        if (!ROLES.includes(invitation.role) || (invitation.role === 'owner' && inviter?.role !== 'owner')) {
+        const inviterCanInvite =
+          inviter?.role === 'owner' || (inviter?.role === 'admin' && invitation.role !== 'owner');
+        if (!ROLES.includes(invitation.role) || !inviterCanInvite) {
           db.prepare("UPDATE invitations SET status = 'expired' WHERE id = ?").run(invitation.id);
           return reply.status(403).send({
             error: 'forbidden',

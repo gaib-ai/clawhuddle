@@ -176,6 +176,10 @@ describe('accepting invitations', () => {
     expect((await accept(await pendingInvite(OWNER, 'superadmin'))).statusCode).toBe(403);
   });
 
+  it('refuses an invitation from someone who is no longer an admin', async () => {
+    expect((await accept(await pendingInvite(MEMBER, 'member'))).statusCode).toBe(403);
+  });
+
   it("honours an owner's owner invitation", async () => {
     const res = await accept(await pendingInvite(OWNER, 'owner'));
     expect(res.statusCode).toBe(200);
