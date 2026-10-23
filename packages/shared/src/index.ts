@@ -175,6 +175,7 @@ export const PROVIDERS: ProviderConfig[] = [
     defaultModel: 'google/gemini-4-argon',
     models: [
       { id: 'google/gemini-4-argon', label: 'Gemini 4 Argon' },
+      { id: 'google/gemini-3.8-flash', label: 'Gemini 3.8 Flash' },
       { id: 'google/gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview' },
       { id: 'google/gemini-3-flash-preview', label: 'Gemini 3 Flash Preview' },
     ],

@@ -345,16 +345,20 @@ export function generateOpenClawConfig(options: {
       ],
     };
   }
-  // Google: gemini-4-argon is served by the Gemini API but is not in OpenClaw's
-  // bundled or remote model catalog (as of 2026.10.3), so referencing it fails
-  // with "Unknown model" unless it is declared under the built-in provider.
-  // Declaring only `models` extends the catalog; auth still comes from the
-  // google auth profile. Emitted unconditionally because DEFAULT_PRIMARY below
-  // is a google model even for members without a google key — a missing
-  // declaration would turn "no credentials" into the misleading "Unknown model".
+  // Google: gemini-4-argon and gemini-3.8-flash are served by the Gemini API
+  // but are not in OpenClaw's bundled or remote model catalog (as of
+  // 2026.10.3; its newest Flash is gemini-3-flash-preview), so referencing
+  // them fails with "Unknown model" unless they are declared under the
+  // built-in provider. Declaring only `models` extends the catalog; auth still
+  // comes from the google auth profile. Emitted unconditionally because
+  // DEFAULT_PRIMARY below is a google model even for members without a google
+  // key — a missing declaration would turn "no credentials" into the
+  // misleading "Unknown model".
   customProviders.google = {
     models: [
       { id: 'gemini-4-argon', name: 'Gemini 4 Argon', reasoning: true, input: ['text', 'image'], contextWindow: 1048576, maxTokens: 32768 },
+      // Limits from the Gemini API ListModels response (2026-10-23): 1M in, 64k out.
+      { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', reasoning: true, input: ['text', 'image'], contextWindow: 1048576, maxTokens: 65536 },
     ],
   };
   if (Object.keys(customProviders).length > 0) {

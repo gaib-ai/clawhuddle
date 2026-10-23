@@ -23,6 +23,16 @@ describe('generateOpenClawConfig (OpenClaw 2026.10.x schema)', () => {
   });
 });
 
+describe('google catalog extension', () => {
+  it('declares the Gemini models OpenClaw 2026.10.x does not know', () => {
+    const google = generateOpenClawConfig(base).models!.providers.google!;
+    expect(google).not.toHaveProperty('apiKey');
+    expect(google.models!.map((m) => m.id)).toEqual(
+      expect.arrayContaining(['gemini-4-argon', 'gemini-3.8-flash']),
+    );
+  });
+});
+
 const withSlack = {
   ...base,
   channelTokens: { slack: { botToken: 'xoxb-test', appToken: 'xapp-test' } },
