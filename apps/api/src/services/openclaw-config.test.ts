@@ -43,28 +43,39 @@ describe('reply latency defaults (2026-10-16)', () => {
     expect(generateOpenClawConfig(base).agents!.defaults.thinkingDefault).toBe('low');
   });
 
-  it('streams Slack progress with per-tool rows and no raw command text', () => {
+  it('streams Slack progress with per-tool rows showing the raw command', () => {
     const slack = generateOpenClawConfig(withSlack).channels!.slack!;
     expect(slack.streaming).toEqual({
       mode: 'progress',
-      progress: { toolProgress: true, commandText: 'status' },
+      progress: { toolProgress: true, commandText: 'raw' },
     });
   });
 
-  it('overlays streaming onto an existing Slack block without touching the rest of it', () => {
+  it('threads every Slack reply so the native status card renders in DMs, groups and channels', () => {
+    const slack = generateOpenClawConfig(withSlack).channels!.slack!;
+    expect(slack.replyToModeByChatType).toEqual({ direct: 'all', group: 'all', channel: 'all' });
+  });
+
+  it('names the raw tool call on progress rows', () => {
+    expect(generateOpenClawConfig(base).agents!.defaults.toolProgressDetail).toBe('raw');
+  });
+
+  it('overlays streaming and reply threading onto an existing Slack block without touching the rest of it', () => {
     const existing = generateOpenClawConfig(withSlack);
     existing.channels!.slack = {
       ...existing.channels!.slack!,
       botToken: 'xoxb-user-rotated',
       allowFrom: ['U123'],
       streaming: { mode: 'off' },
+      replyToModeByChatType: { direct: 'all' },
     };
     const merged = mergeOpenClawConfig(existing as unknown as Parameters<typeof mergeOpenClawConfig>[0], withSlack);
     const slack = merged.channels!.slack!;
     expect(slack.streaming).toEqual({
       mode: 'progress',
-      progress: { toolProgress: true, commandText: 'status' },
+      progress: { toolProgress: true, commandText: 'raw' },
     });
+    expect(slack.replyToModeByChatType).toEqual({ direct: 'all', group: 'all', channel: 'all' });
     expect(slack.botToken).toBe('xoxb-user-rotated');
     expect(slack.allowFrom).toEqual(['U123']);
   });

@@ -60,12 +60,32 @@ export interface SlackStreaming {
  *
  * `progress` (OpenClaw's default since 2026.8.1) streams one task card per
  * turn; `toolProgress: true` adds a row per tool call, and `commandText:
- * 'status'` keeps raw shell text out of Slack. The generator used to force
- * `off`, which hid 3–7 minute agentic turns behind total silence.
+ * 'raw'` puts the actual shell command on the row instead of a bare `exec`
+ * label (members asked to see what the agent is really running; 2026-10-22).
+ * The generator used to force `off`, which hid 3–7 minute agentic turns
+ * behind total silence.
  */
 const SLACK_STREAMING: SlackStreaming = {
   mode: 'progress',
-  progress: { toolProgress: true, commandText: 'status' },
+  progress: { toolProgress: true, commandText: 'raw' },
+};
+
+export type SlackReplyToMode = 'off' | 'first' | 'all';
+
+/**
+ * Where Slack replies go, per chat type. Platform-managed like `streaming`.
+ *
+ * Slack only draws its native agent status bar (the "Working…" card with one
+ * row per tool call) inside a thread. With the default `off`, a DM or channel
+ * turn gets OpenClaw's fallback instead: the tool rows arrive as a separate
+ * message before the answer, which members read as the agent "shooting out
+ * messages". `all` threads every reply under the triggering message, so the
+ * status card renders in DMs, private groups and channels alike.
+ */
+const SLACK_REPLY_TO_MODE: Record<'direct' | 'group' | 'channel', SlackReplyToMode> = {
+  direct: 'all',
+  group: 'all',
+  channel: 'all',
 };
 
 /**
@@ -186,6 +206,8 @@ export interface OpenClawConfig {
       /** 2026.10.x allowlist for `--model` overrides; Doctor derives it from `models` when missing. */
       modelPolicy?: { allow: string[] };
       thinkingDefault?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'adaptive';
+      /** What progress rows say about a tool call: a human title only, or the title plus the raw call (paths, URLs, commands). */
+      toolProgressDetail?: 'explain' | 'raw';
     };
     list?: Array<{
       id: string;
@@ -203,6 +225,7 @@ export interface OpenClawConfig {
     groupPolicy?: string;
     allowBots?: boolean;
     streaming?: SlackStreaming;
+    replyToModeByChatType?: Partial<Record<'direct' | 'group' | 'channel', SlackReplyToMode>>;
     dm?: { enabled: boolean; policy?: string };
   }>;
   plugins: {
@@ -417,6 +440,10 @@ export function generateOpenClawConfig(options: {
       // (`openclaw automations edit <id> --thinking medium`), which lives in
       // the automation store and wins over this default.
       thinkingDefault: 'low',
+      // Progress rows name the actual call (file path, URL, shell command)
+      // next to the human title, instead of a bare "exec". Members asked for
+      // it in Slack (2026-10-22); the Control UI shows the same rows.
+      toolProgressDetail: 'raw',
     },
     list: [{ id: 'main', default: true, reasoningDefault: 'off' }],
   };
@@ -440,6 +467,7 @@ export function generateOpenClawConfig(options: {
         ...(ct.slack.appToken ? { appToken: ct.slack.appToken } : {}),
         ...SLACK_ACCESS,
         streaming: SLACK_STREAMING,
+        replyToModeByChatType: SLACK_REPLY_TO_MODE,
       };
     }
     if (Object.keys(channelsCfg).length > 0) {
@@ -533,6 +561,9 @@ export function mergeOpenClawConfig(
       if (!existing || typeof existing !== 'object' || Array.isArray(existing)) continue;
       if (channelCfg.streaming) {
         (existing as Record<string, unknown>).streaming = channelCfg.streaming;
+      }
+      if (channelCfg.replyToModeByChatType) {
+        (existing as Record<string, unknown>).replyToModeByChatType = channelCfg.replyToModeByChatType;
       }
     }
   }
