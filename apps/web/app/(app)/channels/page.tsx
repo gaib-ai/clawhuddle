@@ -1,8 +1,11 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import Link from 'next/link';
 import { useOrgFetch } from '@/lib/use-org-fetch';
 import { useToast } from '@/components/ui/toast';
+import { gatewayLabel } from '@/lib/gateway-url';
+import type { Gateway } from '@clawhuddle/shared';
 
 interface ChannelConfig {
   channel: string;
@@ -25,7 +28,7 @@ const CHANNELS = [
   },
 ];
 
-function PairingSection({ channelId, orgFetch }: { channelId: string; orgFetch: any }) {
+function PairingSection({ gatewayId, channelId, orgFetch }: { gatewayId: string; channelId: string; orgFetch: any }) {
   const { toast } = useToast();
   const [pairingCode, setPairingCode] = useState('');
   const [approving, setApproving] = useState(false);
@@ -34,7 +37,7 @@ function PairingSection({ channelId, orgFetch }: { channelId: string; orgFetch: 
     if (!pairingCode.trim()) return;
     setApproving(true);
     try {
-      await orgFetch(`/me/channels/${channelId}/pair`, {
+      await orgFetch(`/gateways/${gatewayId}/channels/${channelId}/pair`, {
         method: 'POST',
         body: JSON.stringify({ code: pairingCode.trim() }),
       });
@@ -102,66 +105,60 @@ export default function ChannelsPage() {
   const [editingChannel, setEditingChannel] = useState<string | null>(null);
   const [tokenInput, setTokenInput] = useState('');
   const [saving, setSaving] = useState(false);
-  const [gwStatus, setGwStatus] = useState<string | null>(null);
-  const [redeploying, setRedeploying] = useState(false);
+  // Bot tokens are per instance (a Slack app or Telegram bot can only be
+  // consumed by one container), so the page works on one selected instance.
+  const [gateways, setGateways] = useState<Gateway[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  const fetchChannels = useCallback(async () => {
+  const fetchGateways = useCallback(async () => {
     if (!orgFetch) return;
     try {
-      const res = await orgFetch<{ data: ChannelConfig[] }>('/me/channels');
+      const res = await orgFetch<{ data: Gateway[] }>('/me/gateways');
+      setGateways(res.data);
+      setSelectedId((current) => (current && res.data.some((g) => g.id === current) ? current : res.data[0]?.id ?? null));
+      if (res.data.length === 0) setLoading(false);
+    } catch {
+      setLoading(false);
+    }
+  }, [orgFetch]);
+
+  const fetchChannels = useCallback(async () => {
+    if (!orgFetch || !selectedId) return;
+    try {
+      const res = await orgFetch<{ data: ChannelConfig[] }>(`/gateways/${selectedId}/channels`);
       setConfigs(res.data);
     } catch {
       // ignore
     } finally {
       setLoading(false);
     }
-  }, [orgFetch]);
-
-  const fetchGatewayStatus = useCallback(async () => {
-    if (!orgFetch) return;
-    try {
-      const res = await orgFetch<{ data: { gateway_status: string | null } }>('/me/gateway/status');
-      setGwStatus(res.data.gateway_status);
-    } catch {
-      // ignore
-    }
-  }, [orgFetch]);
+  }, [orgFetch, selectedId]);
 
   useEffect(() => {
-    fetchChannels();
-    fetchGatewayStatus();
-  }, [fetchChannels, fetchGatewayStatus]);
+    fetchGateways();
+  }, [fetchGateways]);
 
-  const redeploy = async () => {
-    if (!orgFetch) return;
-    setRedeploying(true);
-    try {
-      await orgFetch('/me/gateway/redeploy', { method: 'POST' });
-      toast('Gateway redeploying...', 'success');
-      await fetchGatewayStatus();
-    } catch (err: any) {
-      toast(err.message, 'error');
-    } finally {
-      setRedeploying(false);
-    }
-  };
+  useEffect(() => {
+    setConfigs([]);
+    setEditingChannel(null);
+    fetchChannels();
+  }, [fetchChannels]);
 
   const getConfig = (channelId: string) =>
     configs.find((c) => c.channel === channelId);
 
   const saveToken = async (channelId: string) => {
-    if (!orgFetch || !tokenInput.trim()) return;
+    if (!orgFetch || !selectedId || !tokenInput.trim()) return;
     setSaving(true);
     try {
-      await orgFetch(`/me/channels/${channelId}`, {
+      await orgFetch(`/gateways/${selectedId}/channels/${channelId}`, {
         method: 'PUT',
         body: JSON.stringify({ bot_token: tokenInput.trim() }),
       });
-      toast('Token saved. Gateway redeploying...', 'success');
+      toast('Token saved. Instance redeploying...', 'success');
       setTokenInput('');
       setEditingChannel(null);
       await fetchChannels();
-      await fetchGatewayStatus();
     } catch (err: any) {
       toast(err.message, 'error');
     } finally {
@@ -170,14 +167,13 @@ export default function ChannelsPage() {
   };
 
   const removeToken = async (channelId: string) => {
-    if (!orgFetch) return;
+    if (!orgFetch || !selectedId) return;
     setSaving(true);
     try {
-      await orgFetch(`/me/channels/${channelId}`, { method: 'DELETE' });
-      toast('Channel disconnected. Gateway redeploying...', 'success');
+      await orgFetch(`/gateways/${selectedId}/channels/${channelId}`, { method: 'DELETE' });
+      toast('Channel disconnected. Instance redeploying...', 'success');
       setEditingChannel(null);
       await fetchChannels();
-      await fetchGatewayStatus();
     } catch (err: any) {
       toast(err.message, 'error');
     } finally {
@@ -196,47 +192,40 @@ export default function ChannelsPage() {
         </h1>
         <p className="text-sm mb-6" style={{ color: 'var(--text-tertiary)' }}>
           Connect messaging platforms to your AI assistant.
+          {gateways.length > 1 && ' Each instance has its own connections.'}
         </p>
 
-        {/* Gateway status bar */}
-        {!loading && ready && gwStatus && (
-          <div
-            className="flex items-center justify-between mb-4 px-4 py-3 rounded-xl text-sm"
-            style={{
-              background: 'var(--bg-primary)',
-              border: '1px solid var(--border-subtle)',
-            }}
-          >
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>
-                Gateway
-              </span>
-              <span
-                className="inline-flex px-2 py-0.5 rounded text-[11px] font-medium"
-                style={{
-                  background: gwStatus === 'running' ? 'var(--green-muted)' : gwStatus === 'deploying' ? 'var(--blue-muted)' : 'var(--yellow-muted)',
-                  color: gwStatus === 'running' ? 'var(--green)' : gwStatus === 'deploying' ? 'var(--blue)' : 'var(--yellow)',
-                }}
-              >
-                {gwStatus === 'deploying' ? 'deploying...' : gwStatus}
-              </span>
-            </div>
-            <button
-              onClick={redeploy}
-              disabled={redeploying}
-              className="text-xs font-medium transition-colors disabled:opacity-50"
-              style={{ color: 'var(--accent)' }}
-              onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--accent-hover)'; }}
-              onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--accent)'; }}
+        {/* Instance picker — only when there is a choice */}
+        {!loading && ready && gateways.length > 1 && (
+          <div className="flex items-center gap-2 mb-4">
+            <label className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>Instance</label>
+            <select
+              value={selectedId ?? ''}
+              onChange={(e) => setSelectedId(e.target.value)}
+              className="px-3 py-1.5 text-sm rounded-lg"
+              style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
             >
-              {redeploying ? 'Redeploying...' : 'Redeploy'}
-            </button>
+              {gateways.map((g) => (
+                <option key={g.id} value={g.id}>{gatewayLabel(g)}</option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {!loading && ready && gateways.length === 0 && (
+          <div
+            className="rounded-xl p-8 text-center"
+            style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)' }}
+          >
+            <p className="text-sm" style={{ color: 'var(--text-tertiary)' }}>
+              Deploy an instance on the <Link href="/home" className="underline">Home</Link> page first, then connect channels to it here.
+            </p>
           </div>
         )}
 
         {loading || !ready ? (
           <p className="text-sm" style={{ color: 'var(--text-tertiary)' }}>Loading...</p>
-        ) : (
+        ) : !selectedId ? null : (
           <div className="space-y-2">
             {CHANNELS.map((ch) => {
               const config = getConfig(ch.id);
@@ -330,7 +319,7 @@ export default function ChannelsPage() {
 
                   {/* Pairing section — always visible when configured */}
                   {config?.configured && !isEditing && (
-                    <PairingSection channelId={ch.id} orgFetch={orgFetch} />
+                    <PairingSection gatewayId={selectedId} channelId={ch.id} orgFetch={orgFetch} />
                   )}
 
                   {/* Edit token area — only when editing */}
@@ -395,6 +384,15 @@ export default function ChannelsPage() {
                 </div>
               );
             })}
+
+            <div
+              className="rounded-xl px-4 py-3 text-xs"
+              style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)', color: 'var(--text-tertiary)' }}
+            >
+              <span className="font-medium" style={{ color: 'var(--text-secondary)' }}>Other channels</span>
+              {' '}(Slack, Discord, WhatsApp, Signal, iMessage and the rest) are set up inside OpenClaw itself, not here.
+              Open your instance from <Link href="/home" style={{ color: 'var(--accent)' }}>Home</Link> and add them under its Channels settings.
+            </div>
           </div>
         )}
       </div>
