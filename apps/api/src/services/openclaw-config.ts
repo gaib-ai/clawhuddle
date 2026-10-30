@@ -1,4 +1,4 @@
-import { PROVIDERS } from '@clawhuddle/shared';
+import { PROVIDERS, providerForModel } from '@clawhuddle/shared';
 
 // Channel plugins enabled on every gateway — exactly the channels this platform
 // can hand a token to (see validChannels in routes/org/member-channels.ts).
@@ -255,6 +255,12 @@ export function generateOpenClawConfig(options: {
    * to the natural (alphabetical) order of activeProviderIds.
    */
   primaryProviderId?: string;
+  /**
+   * Full model ref (from the shared catalog) pinned as the primary. Wins over
+   * primaryProviderId when the member has a key for the model's provider;
+   * otherwise ignored, so an instance never ends up on a model it cannot reach.
+   */
+  primaryModel?: string;
 }): OpenClawConfig {
   const { port, token } = options;
   const channels = options.enabledChannels ?? CHANNEL_PLUGINS;
@@ -362,9 +368,14 @@ export function generateOpenClawConfig(options: {
         // lists <provider>/<model> ids, though the prefixed forms still route).
         // Tracks the newest Opus — 5.5 as of 2026-10-14; 1M context, $4/$20 per 1M.
         { id: 'claude-opus-latest', name: 'Claude Opus (latest)', reasoning: true, input: ['text', 'image'], cost: { input: 4, output: 20, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000000, maxTokens: 32000, compat: kioskCompat },
-        // Token Router promotion routed through the kiosk (added 2026-10-21):
-        // free tier, text only, 1M context, 8192 max completion per the kiosk catalog.
-        { id: 'minimax-m3.1-flash:free', name: 'MiniMax M3.1 Flash (free)', input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000000, maxTokens: 8192, compat: kioskCompat },
+        // Rolling alias for the newest Sonnet (5.5 as of 2026-10-30; the kiosk
+        // catalog lists 1M context, 8192 max completion, $2/$10 per 1M).
+        { id: 'claude-sonnet-latest', name: 'Claude Sonnet (latest)', reasoning: true, input: ['text', 'image'], cost: { input: 2, output: 10, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000000, maxTokens: 8192, compat: kioskCompat },
+        // MiniMax M3.1 Flash: text only, 1M context, 8192 max completion,
+        // $0.15/$0.60 per 1M per the kiosk catalog (2026-10-30). The free
+        // promotion id `minimax-m3.1-flash:free` (2026-10-21) was retired by the
+        // kiosk on 2026-10-30 and now answers 400 UNKNOWN_MODEL.
+        { id: 'minimax-m3.1-flash', name: 'MiniMax M3.1 Flash', input: ['text'], cost: { input: 0.15, output: 0.6, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000000, maxTokens: 8192, compat: kioskCompat },
       ],
     };
   }
@@ -392,10 +403,11 @@ export function generateOpenClawConfig(options: {
   //  - If the org pinned a primary provider (Admin → API Keys) AND the member
   //    has a key for it, that provider's model (honoring the per-provider
   //    model override) becomes primary; other active providers are fallbacks.
-  //  - Otherwise the primary defaults to google/gemini-4-argon —
+  //  - Otherwise the primary defaults to google/gemini-3.8-flash (Gemini 4
+  //    Argon until 2026-10-28) —
   //    NOT the first active provider — so gateways behave consistently no
   //    matter which keys happen to exist.
-  const DEFAULT_PRIMARY = 'google/gemini-4-argon';
+  const DEFAULT_PRIMARY = 'google/gemini-3.8-flash';
   const overrides = options.modelOverrides ?? {};
   const resolveModel = (p: (typeof PROVIDERS)[number]) => overrides[p.id] || p.defaultModel;
 
@@ -403,11 +415,14 @@ export function generateOpenClawConfig(options: {
     .map((id) => PROVIDERS.find((p) => p.id === id))
     .filter(Boolean) as typeof PROVIDERS;
 
-  const pinned = options.primaryProviderId
-    ? activeProviders.find((p) => p.id === options.primaryProviderId)
-    : undefined;
+  // A pinned model names its provider through the catalog; it only counts when
+  // that provider is active for this member, else fall through to the provider pin.
+  const modelProvider = options.primaryModel ? providerForModel(options.primaryModel) : undefined;
+  const pinnedByModel = modelProvider && activeProviders.includes(modelProvider) ? modelProvider : undefined;
+  const pinned = pinnedByModel
+    ?? (options.primaryProviderId ? activeProviders.find((p) => p.id === options.primaryProviderId) : undefined);
 
-  const primary = pinned ? resolveModel(pinned) : DEFAULT_PRIMARY;
+  const primary = pinnedByModel ? options.primaryModel! : pinned ? resolveModel(pinned) : DEFAULT_PRIMARY;
   const fallbacks = activeProviders
     .filter((p) => p !== pinned)
     .map(resolveModel)
@@ -420,10 +435,15 @@ export function generateOpenClawConfig(options: {
   const entryFor = (p: (typeof PROVIDERS)[number]): ModelEntry =>
     p.agentRuntime ? { agentRuntime: { id: p.agentRuntime } } : {};
 
+  // Load every catalog model of each provider the member has a key for, not
+  // just the primary and fallbacks: Doctor derives modelPolicy.allow from this
+  // map, so this is what members can switch between inside OpenClaw (/model,
+  // Control UI). The key's override is included too in case it is off-catalog.
   const models: Record<string, ModelEntry> = { [primary]: pinned ? entryFor(pinned) : {} };
   for (const p of activeProviders) {
-    const m = resolveModel(p);
-    if (!(m in models)) models[m] = entryFor(p);
+    for (const m of [...(p.models ?? []).map((m) => m.id), resolveModel(p)]) {
+      if (!(m in models)) models[m] = entryFor(p);
+    }
   }
 
   config.agents = {

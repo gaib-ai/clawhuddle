@@ -23,6 +23,49 @@ describe('generateOpenClawConfig (OpenClaw 2026.10.x schema)', () => {
   });
 });
 
+describe('default model', () => {
+  it('defaults the primary to Gemini 3.8 Flash when no provider is pinned', () => {
+    expect(generateOpenClawConfig(base).agents!.defaults.model.primary).toBe('google/gemini-3.8-flash');
+  });
+
+  it('uses Gemini 3.8 Flash for a pinned google provider without a model override', () => {
+    const cfg = generateOpenClawConfig({ ...base, primaryProviderId: 'google' });
+    expect(cfg.agents!.defaults.model.primary).toBe('google/gemini-3.8-flash');
+  });
+
+  it('a pinned model beats the provider pin and the key override', () => {
+    const cfg = generateOpenClawConfig({
+      ...base,
+      primaryProviderId: 'google',
+      modelOverrides: { google: 'google/gemini-3.8-flash' },
+      primaryModel: 'tokenkiosk/claude-sonnet-latest',
+    });
+    const defaults = cfg.agents!.defaults;
+    expect(defaults.model.primary).toBe('tokenkiosk/claude-sonnet-latest');
+    expect(defaults.model.fallbacks).toEqual(['google/gemini-3.8-flash']);
+    expect(defaults.modelPolicy!.allow).toContain('tokenkiosk/claude-sonnet-latest');
+    expect(cfg.models!.providers.tokenkiosk!.models!.map((m) => m.id)).toContain('claude-sonnet-latest');
+  });
+
+  it('loads every catalog model of the active providers so members can switch inside OpenClaw', () => {
+    const defaults = generateOpenClawConfig({ ...base, primaryProviderId: 'google' }).agents!.defaults;
+    const loaded = Object.keys(defaults.models);
+    for (const id of ['google/gemini-3.8-flash', 'google/gemini-4-argon', 'tokenkiosk/azure/gpt-5.5', 'tokenkiosk/claude-sonnet-latest', 'tokenkiosk/minimax-m3.1-flash']) {
+      expect(loaded).toContain(id);
+    }
+    expect(loaded[0]).toBe('google/gemini-3.8-flash');
+    expect(defaults.modelPolicy!.allow).toEqual(loaded);
+    // Fallbacks stay one per provider.
+    expect(defaults.model.fallbacks).toEqual(['tokenkiosk/azure/gpt-5.5']);
+  });
+
+  it('ignores a pinned model whose provider the member has no key for', () => {
+    const cfg = generateOpenClawConfig({ ...base, primaryProviderId: 'google', primaryModel: 'anthropic/claude-fable-5' });
+    expect(cfg.agents!.defaults.model.primary).toBe('google/gemini-3.8-flash');
+    expect(Object.keys(cfg.agents!.defaults.models)).not.toContain('anthropic/claude-fable-5');
+  });
+});
+
 describe('google catalog extension', () => {
   it('declares the Gemini models OpenClaw 2026.10.x does not know', () => {
     const google = generateOpenClawConfig(base).models!.providers.google!;

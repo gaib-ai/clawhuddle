@@ -127,7 +127,9 @@ export function ApiKeyForm({ initialKeys, fetchFn, scope = 'org', summary, onMut
     setSaving(true);
     try {
       const providerCfg = PROVIDERS.find((p) => p.id === provider);
-      const defaultModel = providerCfg?.models ? (selectedModels[provider] || providerCfg.defaultModel) : undefined;
+      // Personal keys carry no model override: members pick a model per
+      // instance on Home, and the org key's override keeps applying otherwise.
+      const defaultModel = !isUserScope && providerCfg?.models ? (selectedModels[provider] || providerCfg.defaultModel) : undefined;
       await fetchFn(basePath, {
         method: 'POST',
         body: JSON.stringify({ provider, key, credentialType, defaultModel }),
@@ -223,7 +225,7 @@ export function ApiKeyForm({ initialKeys, fetchFn, scope = 'org', summary, onMut
                 </h3>
                 {isUserScope && <SourceBadge source={source} />}
               </div>
-              {models ? (
+              {isUserScope ? null : models ? (
                 <select
                   value={currentModel}
                   onChange={(e) => {
@@ -357,14 +359,14 @@ export function ApiKeyForm({ initialKeys, fetchFn, scope = 'org', summary, onMut
               <p className="text-[11px] mb-3" style={{ color: 'var(--text-tertiary)' }}>
                 {basePathOverride
                   ? 'This member is using the organization default. Adding a key here overrides it for this member only.'
-                  : 'Your gateway is currently using the organization default. Add a key below to override it for your account only.'}
+                  : 'Your instances are currently using the organization default. Add a key below to override it for your account only.'}
               </p>
             )}
             {isUserScope && source === 'none' && (
               <p className="text-[11px] mb-3" style={{ color: 'var(--text-tertiary)' }}>
                 {basePathOverride
-                  ? 'No org default for this provider. Add a key to enable it on this member’s gateway.'
-                  : 'No org default for this provider. Add a personal key to enable it on your gateway.'}
+                  ? 'No org default for this provider. Add a key to enable it on this member’s instances.'
+                  : 'No org default for this provider. Add a personal key to enable it on your instances.'}
               </p>
             )}
 

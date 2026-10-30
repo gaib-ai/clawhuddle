@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-ClawHuddle is a multi-tenant platform for managing OpenClaw AI gateway instances. Each org member gets a personal OpenClaw Docker container with auto-provisioned config, credentials, and skills.
+ClawHuddle is a multi-tenant platform for managing OpenClaw AI gateway instances. Each org member runs one or more personal OpenClaw Docker containers ("instances", rows in `gateways`, numbered by `slot`) with auto-provisioned config, credentials, and skills. How many a member may run is `org_members.max_gateways` → `organizations.max_gateways_per_user` → `MAX_GATEWAYS_PER_USER` (default 1). Skills and API keys are per user and shared by all of a member's instances; channel bot tokens (`gateway_channels`) and the primary-provider pin are per instance.
 
 ## Architecture
 
@@ -22,12 +22,14 @@ The API never trusts a client-supplied user id. Both apps share `API_AUTH_SECRET
 
 - **User tokens** (`aud: 'user'`, 1h): minted in NextAuth's `jwt` callback (`apps/web/lib/auth.ts`), re-minted when < 15 min remain, exposed as `session.apiToken`. `apiFetch` (`apps/web/lib/api.ts`) attaches it as `Authorization: Bearer …` and retries once after refreshing the session on a 401. `authPlugin` verifies it.
 - **Internal tokens** (`aud: 'internal'`, 60s): the web server's calls to `/api/auth/login` and `/api/auth/check-access`, guarded by `requireInternal`. These routes return any user's id by email, so they must never be reachable without one.
-- `gateway_token` is a bearer credential: member responses only include it for the caller's own row. Admins get another member's token one at a time from `GET /api/orgs/:orgId/gateways/members/:memberId/access` (logged; admins can't open an owner's gateway, owners can open any).
+- A gateway's `token` is a bearer credential: it is only returned by `GET /me/gateways` for the caller's own instances. Admins get another member's one at a time from `GET /api/orgs/:orgId/gateways/:gatewayId/access` (logged; admins can't open an owner's gateway, owners can open any). Members act only on their own instances; `requireGatewayAccess` in `routes/org/gateways.ts` enforces it.
 
 ## Security Invariants
 
+- Device pairing: `docker/gateway/entrypoint.sh` still auto-approves pending device requests every 5 s (kept on purpose). The web app's Device Requests page (`GET /me/device-requests`, admin `GET /device-requests`, `POST /gateways/:gatewayId/devices/:requestId/{approve,reject}` → `openclaw devices …` exec'd in the container) is the manual path; it only sees a request in the window before the loop approves it, or on a container where the loop is off.
 - Gateways run agent-controlled code (and anyone who can message them can steer it). They live on `GATEWAY_NETWORK` (`clawhuddle-gateways`) with only Traefik and claw-proxy; the API and web stay on `clawhuddle-net`.
-- Slack defaults to OpenClaw's own policy (`dmPolicy: pairing`, `groupPolicy: allowlist`, `allowBots: false`). `mergeOpenClawConfig` migrates blocks still carrying the old wide-open platform default; blocks the member changed are left alone. The migration runs once per gateway (`org_members.slack_access_migrated_at`), so a member can open Slack again — even to exactly the old default — and keep it across redeploys.
+- Slack defaults to OpenClaw's own policy (`dmPolicy: pairing`, `groupPolicy: allowlist`, `allowBots: false`). `mergeOpenClawConfig` migrates blocks still carrying the old wide-open platform default; blocks the member changed are left alone. The migration runs once per gateway (`gateways.slack_access_migrated_at`), so a member can open Slack again — even to exactly the old default — and keep it across redeploys.
+- Instance naming is in `services/gateway-store.ts`: slot 1 keeps the pre-instance container name `clawhuddle-gw-<org8>-<user8>` and data dir `data/gateways/<orgId>/<userId>`; slot N≥2 adds `-N` to both. `org_members.gateway_*` only mirror the slot-1 row (for rollback) — never read them. All `gateways` writes go through the store so the mirror stays right. `migrate.ts` re-runs every migration on each boot; one-shot backfills are guarded by `migration_marks` (see `020-gateways.sql`).
 - Port-forward Traefik files are written with `JSON.stringify` (JSON is valid YAML) — never interpolate request input into them.
 - Only owners can grant the owner role, including through invitations (checked when sent and again when accepted); roles and statuses are validated against fixed lists.
 
@@ -84,6 +86,8 @@ Providers are defined in `packages/shared/src/index.ts` as `PROVIDERS` array. Ea
 - Optional: `supportsSetupToken`, `supportsOAuth`
 
 API keys are stored in `api_keys` table (org-scoped), written to `auth-profiles.json` for standard providers, or embedded in `openclaw.json` for custom providers (claw-proxy, token-kiosk).
+
+**Primary model.** `agents.defaults.model.primary` is resolved per instance by `getPrimaryPin` in `services/gateway-store.ts`, most specific first: `gateways.primary_model` (Home card picks a model by name, provider implied via `providerForModel`) → `gateways.primary_provider` (older pin) → `org_members.primary_provider` (My API Keys) → `organizations.primary_provider` + `organizations.primary_model` (Admin → API Keys: provider select plus a model select limited to that provider; changing the provider clears the model). A model pin only counts when the member has a key for its provider; otherwise the generator falls back to the provider pin, then to `DEFAULT_PRIMARY`. The provider pick-lists in `PROVIDERS[].models` are deliberately short (Google: Flash 3.8 + Argon 4; Token Kiosk: GPT-5.5 + Claude Sonnet latest + MiniMax M3.1 Flash); the generator still declares the previously offered kiosk models so old pins keep resolving.
 
 ## Config Generation
 
