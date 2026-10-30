@@ -15,10 +15,13 @@ CREATE TABLE IF NOT EXISTS organizations (
     slug TEXT UNIQUE NOT NULL,
     tier TEXT NOT NULL DEFAULT 'free',
     primary_provider TEXT,
+    primary_model TEXT,
+    max_gateways_per_user INTEGER,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- Organization members (links users to orgs with roles and gateway state)
+-- Organization members (links users to orgs with roles). The gateway_* columns
+-- mirror the member's slot-1 row in `gateways` and are not read by new code.
 CREATE TABLE IF NOT EXISTS org_members (
     id TEXT PRIMARY KEY,
     org_id TEXT NOT NULL REFERENCES organizations(id),
@@ -29,8 +32,45 @@ CREATE TABLE IF NOT EXISTS org_members (
     gateway_status TEXT,
     gateway_token TEXT,
     gateway_subdomain TEXT,
+    primary_provider TEXT,
+    slack_access_migrated_at TEXT,
+    max_gateways INTEGER,
     joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(org_id, user_id)
+);
+
+-- Gateway instances: one row per OpenClaw container (see migrations/020-gateways.sql)
+CREATE TABLE IF NOT EXISTS migration_marks (
+    name TEXT PRIMARY KEY,
+    applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS gateways (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL REFERENCES organizations(id),
+    member_id TEXT NOT NULL REFERENCES org_members(id) ON DELETE CASCADE,
+    slot INTEGER NOT NULL,
+    label TEXT,
+    status TEXT,
+    port INTEGER,
+    token TEXT NOT NULL,
+    subdomain TEXT UNIQUE NOT NULL,
+    primary_provider TEXT,
+    primary_model TEXT,
+    slack_access_migrated_at TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(member_id, slot)
+);
+CREATE INDEX IF NOT EXISTS idx_gateways_org ON gateways(org_id);
+
+CREATE TABLE IF NOT EXISTS gateway_channels (
+    gateway_id TEXT NOT NULL REFERENCES gateways(id) ON DELETE CASCADE,
+    channel TEXT NOT NULL,
+    bot_token TEXT NOT NULL,
+    app_token TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (gateway_id, channel)
 );
 
 -- Invitations

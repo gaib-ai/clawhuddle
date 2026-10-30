@@ -7,7 +7,8 @@ import { createOrgFetch } from '@/lib/api';
 import { useToast } from '@/components/ui/toast';
 import { useConfirm } from '@/components/ui/confirm-dialog';
 import { MemberApiKeysModal } from './member-api-keys-modal';
-import type { OrgMember } from '@clawhuddle/shared';
+import { gatewayUrl, gatewayLabel, type GatewayAccess } from '@/lib/gateway-url';
+import type { GatewaySummary, OrgMember } from '@clawhuddle/shared';
 
 function Badge({ color, children }: { color: 'green' | 'red' | 'yellow' | 'blue' | 'purple' | 'gray'; children: React.ReactNode }) {
   const styles: Record<string, { bg: string; text: string }> = {
@@ -63,6 +64,8 @@ export function MemberTable({ initialMembers }: Props) {
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviting, setInviting] = useState(false);
   const [limitHit, setLimitHit] = useState(false);
+  const [gatewayLimitHit, setGatewayLimitHit] = useState<{ member: OrgMember; limit: number } | null>(null);
+  // keyed by gateway id, or by member id while a new instance is being created
   const [loadingGateway, setLoadingGateway] = useState<string | null>(null);
   const [redeployingAll, setRedeployingAll] = useState(false);
   const [apiKeysMember, setApiKeysMember] = useState<OrgMember | null>(null);
@@ -83,18 +86,17 @@ export function MemberTable({ initialMembers }: Props) {
   }, [orgFetch]);
 
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const hasDeploying = members.some((m) => m.gateway_status === 'deploying');
+  const isStarting = (g: GatewaySummary) => g.status === 'deploying' || g.status === 'provisioning';
+  const hasDeploying = members.some((m) => (m.gateways ?? []).some(isStarting));
 
   useEffect(() => {
     if (hasDeploying) {
       pollingRef.current = setInterval(async () => {
-        const deploying = members.filter((m) => m.gateway_status === 'deploying');
-        for (const m of deploying) {
+        const deploying = members.flatMap((m) => m.gateways ?? []).filter(isStarting);
+        for (const g of deploying) {
           try {
-            const res = await orgFetch<{ data: { gateway_status: string } }>(
-              `/gateways/members/${m.id}/status`
-            );
-            if (res.data.gateway_status !== 'deploying') {
+            const res = await orgFetch<{ data: { status: string } }>(`/gateways/${g.id}/status`);
+            if (res.data.status !== 'deploying') {
               await refresh();
               return;
             }
@@ -172,25 +174,39 @@ export function MemberTable({ initialMembers }: Props) {
     await refresh();
   };
 
-  const gatewayAction = async (memberId: string, action: 'deploy' | 'start' | 'stop' | 'remove' | 'redeploy') => {
-    setLoadingGateway(memberId);
+  const deployNew = async (member: OrgMember) => {
+    setLoadingGateway(member.id);
+    setGatewayLimitHit(null);
     try {
-      switch (action) {
-        case 'deploy':
-          await orgFetch(`/gateways/members/${memberId}`, { method: 'POST' });
-          break;
-        case 'start':
-          await orgFetch(`/gateways/members/${memberId}/start`, { method: 'POST' });
-          break;
-        case 'stop':
-          await orgFetch(`/gateways/members/${memberId}/stop`, { method: 'POST' });
-          break;
-        case 'redeploy':
-          await orgFetch(`/gateways/members/${memberId}/redeploy`, { method: 'POST' });
-          break;
-        case 'remove':
-          await orgFetch(`/gateways/members/${memberId}`, { method: 'DELETE' });
-          break;
+      await orgFetch(`/gateways/members/${member.id}`, { method: 'POST', body: JSON.stringify({}) });
+      await refresh();
+    } catch (err: any) {
+      if (err.code === 'gateway_limit') {
+        setGatewayLimitHit({ member, limit: err.data?.limit ?? member.effective_max_gateways ?? 1 });
+      } else {
+        toast(err.message, 'error');
+      }
+    } finally {
+      setLoadingGateway(null);
+    }
+  };
+
+  const gatewayAction = async (gateway: GatewaySummary, action: 'start' | 'stop' | 'remove' | 'redeploy') => {
+    if (action === 'remove') {
+      const ok = await confirm({
+        title: 'Remove instance',
+        description: `Remove ${gatewayLabel(gateway)}? Its workspace and channel connections are deleted.`,
+        confirmLabel: 'Remove',
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    setLoadingGateway(gateway.id);
+    try {
+      if (action === 'remove') {
+        await orgFetch(`/gateways/${gateway.id}`, { method: 'DELETE' });
+      } else {
+        await orgFetch(`/gateways/${gateway.id}/${action}`, { method: 'POST' });
       }
       await refresh();
     } catch (err: any) {
@@ -200,7 +216,23 @@ export function MemberTable({ initialMembers }: Props) {
     }
   };
 
-  const hasDeployedGateway = members.some((m) => m.gateway_port != null);
+  const setMaxGateways = async (member: OrgMember, raw: string) => {
+    const next = raw.trim() === '' ? null : Number(raw);
+    if (next === (member.max_gateways ?? null)) return;
+    if (next !== null && (!Number.isInteger(next) || next < 1)) {
+      toast('Max must be a whole number of 1 or more, or blank for the org default', 'error');
+      return;
+    }
+    try {
+      await orgFetch(`/members/${member.id}`, { method: 'PATCH', body: JSON.stringify({ max_gateways: next }) });
+      setGatewayLimitHit(null);
+      await refresh();
+    } catch (err: any) {
+      toast(err.message, 'error');
+    }
+  };
+
+  const hasDeployedGateway = members.some((m) => (m.gateways ?? []).length > 0);
 
   const redeployAll = async () => {
     setRedeployingAll(true);
@@ -223,37 +255,20 @@ export function MemberTable({ initialMembers }: Props) {
     }
   };
 
-  type GatewayAccess = Pick<OrgMember, 'gateway_token' | 'gateway_subdomain' | 'gateway_port'>;
-
-  const gatewayUrl = ({ gateway_token, gateway_subdomain, gateway_port }: GatewayAccess) => {
-    if (!gateway_token) return null;
-    const { protocol, hostname } = window.location;
-    if (hostname === 'localhost' && gateway_port) {
-      return `http://localhost:${gateway_port}/?token=${gateway_token}`;
-    }
-    if (gateway_subdomain) {
-      const gwDomain = process.env.NEXT_PUBLIC_GATEWAY_DOMAIN || hostname;
-      return `${protocol}//${gateway_subdomain}.${gwDomain}/?token=${gateway_token}`;
-    }
-    return null;
-  };
-
   // Same rule as role changes: owners can open any gateway, admins any but an owner's.
   // The API enforces it; this only decides whether to show the button.
   const canOpenGateway = (member: OrgMember) =>
-    !!member.gateway_token || memberRole === 'owner' || (memberRole === 'admin' && member.role !== 'owner');
+    member.user_id === userId || memberRole === 'owner' || (memberRole === 'admin' && member.role !== 'owner');
 
-  const openGateway = async (member: OrgMember) => {
+  const openGateway = async (gateway: GatewaySummary) => {
     // Open the tab during the click so popup blockers allow it, then point it at
-    // the gateway once we have the token. Other members' tokens aren't in the
-    // members list — fetch them on demand from the admin-only access endpoint.
+    // the gateway once we have the token. Tokens aren't in the members list —
+    // fetch them on demand from the admin-only access endpoint.
     const win = window.open('', '_blank');
     if (!win) return;
     win.opener = null;
     try {
-      const access: GatewayAccess = member.gateway_token
-        ? member
-        : (await orgFetch<{ data: GatewayAccess }>(`/gateways/members/${member.id}/access`)).data;
+      const access = (await orgFetch<{ data: GatewayAccess }>(`/gateways/${gateway.id}/access`)).data;
       const url = gatewayUrl(access);
       if (url) {
         win.location.href = url;
@@ -266,23 +281,21 @@ export function MemberTable({ initialMembers }: Props) {
     }
   };
 
-  const gatewayStatusBadge = (member: OrgMember) => {
-    if (!member.gateway_status) return <Badge color="gray">not deployed</Badge>;
-    if (member.gateway_status === 'deploying') {
+  const gatewayStatusBadge = (gateway: GatewaySummary) => {
+    if (gateway.status === 'deploying' || gateway.status === 'provisioning') {
       return (
         <span className="animate-pulse-amber">
           <Badge color="blue">deploying...</Badge>
         </span>
       );
     }
-    if (member.gateway_status === 'running') return <Badge color="green">running</Badge>;
-    if (member.gateway_status === 'stopped') return <Badge color="yellow">stopped</Badge>;
-    return <Badge color="blue">{member.gateway_status}</Badge>;
+    if (gateway.status === 'running') return <Badge color="green">running</Badge>;
+    if (gateway.status === 'stopped') return <Badge color="yellow">stopped</Badge>;
+    return <Badge color="gray">{gateway.status ?? 'unknown'}</Badge>;
   };
 
-  const gatewayActions = (member: OrgMember) => {
-    const isLoading = loadingGateway === member.id;
-    if (isLoading) {
+  const gatewayActions = (member: OrgMember, gateway: GatewaySummary) => {
+    if (loadingGateway === gateway.id) {
       return (
         <span className="text-xs animate-pulse" style={{ color: 'var(--text-tertiary)' }}>
           working...
@@ -290,44 +303,85 @@ export function MemberTable({ initialMembers }: Props) {
       );
     }
 
-    if (!member.gateway_status) {
-      return <ActionBtn onClick={() => gatewayAction(member.id, 'deploy')}>Deploy</ActionBtn>;
-    }
-
-    if (member.gateway_status === 'deploying') {
+    if (gateway.status === 'deploying' || gateway.status === 'provisioning') {
       return (
         <span className="flex gap-3 items-center">
           <span className="text-xs" style={{ color: 'var(--blue)' }}>starting up...</span>
-          <ActionBtn onClick={() => gatewayAction(member.id, 'stop')}>Stop</ActionBtn>
-          <ActionBtn onClick={() => gatewayAction(member.id, 'remove')} color="danger">Remove</ActionBtn>
+          <ActionBtn onClick={() => gatewayAction(gateway, 'stop')}>Stop</ActionBtn>
+          <ActionBtn onClick={() => gatewayAction(gateway, 'remove')} color="danger">Remove</ActionBtn>
         </span>
       );
     }
 
-    if (member.gateway_status === 'running') {
+    if (gateway.status === 'running') {
       return (
         <span className="flex gap-3">
           {canOpenGateway(member) && (
-            <ActionBtn onClick={() => openGateway(member)} color="success">Open</ActionBtn>
+            <ActionBtn onClick={() => openGateway(gateway)} color="success">Open</ActionBtn>
           )}
-          <ActionBtn onClick={() => gatewayAction(member.id, 'redeploy')}>Redeploy</ActionBtn>
-          <ActionBtn onClick={() => gatewayAction(member.id, 'stop')}>Stop</ActionBtn>
-          <ActionBtn onClick={() => gatewayAction(member.id, 'remove')} color="danger">Remove</ActionBtn>
+          <ActionBtn onClick={() => gatewayAction(gateway, 'redeploy')}>Redeploy</ActionBtn>
+          <ActionBtn onClick={() => gatewayAction(gateway, 'stop')}>Stop</ActionBtn>
+          <ActionBtn onClick={() => gatewayAction(gateway, 'remove')} color="danger">Remove</ActionBtn>
         </span>
       );
     }
 
-    if (member.gateway_status === 'stopped') {
-      return (
-        <span className="flex gap-3">
-          <ActionBtn onClick={() => gatewayAction(member.id, 'start')} color="success">Start</ActionBtn>
-          <ActionBtn onClick={() => gatewayAction(member.id, 'redeploy')}>Redeploy</ActionBtn>
-          <ActionBtn onClick={() => gatewayAction(member.id, 'remove')} color="danger">Remove</ActionBtn>
-        </span>
-      );
-    }
+    return (
+      <span className="flex gap-3">
+        <ActionBtn onClick={() => gatewayAction(gateway, 'start')} color="success">Start</ActionBtn>
+        <ActionBtn onClick={() => gatewayAction(gateway, 'redeploy')}>Redeploy</ActionBtn>
+        <ActionBtn onClick={() => gatewayAction(gateway, 'remove')} color="danger">Remove</ActionBtn>
+      </span>
+    );
+  };
 
-    return null;
+  // One line per instance, then the deploy affordance (greyed out at the limit).
+  const gatewayCell = (member: OrgMember) => {
+    const list = member.gateways ?? [];
+    const max = member.effective_max_gateways ?? 1;
+    const atLimit = list.length >= max;
+    return (
+      <div className="flex flex-col gap-2">
+        {list.map((g) => (
+          <div key={g.id} className="flex items-center gap-3 flex-wrap">
+            <span className="text-xs font-medium min-w-20" style={{ color: 'var(--text-primary)' }} title={`slot ${g.slot}`}>
+              {gatewayLabel(g)}
+            </span>
+            {gatewayStatusBadge(g)}
+            {g.container_id && (
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(g.container_id!);
+                  toast('Container ID copied', 'success');
+                }}
+                className="font-mono text-[10px] cursor-pointer hover:underline"
+                style={{ color: 'var(--text-tertiary)' }}
+                title={g.container_id}
+              >
+                {g.container_id.slice(0, 12)}
+              </button>
+            )}
+            {gatewayActions(member, g)}
+          </div>
+        ))}
+        {loadingGateway === member.id ? (
+          <span className="text-xs animate-pulse" style={{ color: 'var(--text-tertiary)' }}>deploying...</span>
+        ) : atLimit ? (
+          list.length === 0 ? null : (
+            <span className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
+              {list.length}/{max} instances
+            </span>
+          )
+        ) : (
+          <span className="flex items-center gap-2">
+            <ActionBtn onClick={() => deployNew(member)}>{list.length === 0 ? 'Deploy' : '+ New instance'}</ActionBtn>
+            {list.length > 0 && (
+              <span className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>{list.length}/{max}</span>
+            )}
+          </span>
+        )}
+      </div>
+    );
   };
 
   const roleColor = (role: string) => {
@@ -399,6 +453,26 @@ export function MemberTable({ initialMembers }: Props) {
         </div>
       )}
 
+      {/* Gateway limit banner */}
+      {gatewayLimitHit && (
+        <div
+          className="flex items-center gap-3 mb-4 px-4 py-3 rounded-lg text-sm"
+          style={{ background: 'var(--yellow-muted)', border: '1px solid rgba(234, 179, 8, 0.3)' }}
+        >
+          <span style={{ color: 'var(--text-primary)' }}>
+            {gatewayLimitHit.member.name || gatewayLimitHit.member.email} is at their limit of {gatewayLimitHit.limit} instance{gatewayLimitHit.limit === 1 ? '' : 's'}.
+            Raise it in the Max column, or for everyone under Admin → API Keys → Instances per member.
+          </span>
+          <button
+            onClick={() => setGatewayLimitHit(null)}
+            className="shrink-0 text-xs px-1 ml-auto"
+            style={{ color: 'var(--text-tertiary)' }}
+          >
+            &times;
+          </button>
+        </div>
+      )}
+
       {/* Invite link */}
       {inviteLink && (
         <div
@@ -439,7 +513,7 @@ export function MemberTable({ initialMembers }: Props) {
         <table className="w-full text-sm">
           <thead>
             <tr style={{ borderBottom: '1px solid var(--border-primary)' }}>
-              {['Name', 'Email', 'Role', 'Status', 'Gateway', 'Gateway Actions', 'Member'].map((h) => (
+              {['Name', 'Email', 'Role', 'Status', 'Gateways', 'Max', 'Member'].map((h) => (
                 <th
                   key={h}
                   className="px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-wider"
@@ -502,27 +576,21 @@ export function MemberTable({ initialMembers }: Props) {
                   </Badge>
                 </td>
                 <td className="px-4 py-3">
-                  <div className="flex flex-col gap-1">
-                    <div className="flex items-center gap-2">
-                      {gatewayStatusBadge(member)}
-                    </div>
-                    {(member as any).container_id && (
-                      <button
-                        onClick={() => {
-                          navigator.clipboard.writeText((member as any).container_id);
-                          toast('Container ID copied', 'success');
-                        }}
-                        className="font-mono text-[10px] truncate max-w-[120px] text-left cursor-pointer hover:underline"
-                        style={{ color: 'var(--text-tertiary)' }}
-                        title={(member as any).container_id}
-                      >
-                        {(member as any).container_id.slice(0, 12)}
-                      </button>
-                    )}
-                  </div>
+                  {gatewayCell(member)}
                 </td>
                 <td className="px-4 py-3">
-                  {gatewayActions(member)}
+                  <input
+                    type="number"
+                    min={1}
+                    key={`${member.id}-${member.max_gateways ?? ''}`}
+                    defaultValue={member.max_gateways ?? ''}
+                    placeholder={String(member.effective_max_gateways ?? 1)}
+                    title="Max instances for this member. Blank = org default."
+                    onBlur={(e) => setMaxGateways(member, e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+                    className="w-14 px-2 py-1 text-xs rounded-md"
+                    style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
+                  />
                 </td>
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-3">

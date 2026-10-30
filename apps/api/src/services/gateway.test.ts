@@ -14,6 +14,7 @@ import { reconcileAuthProfileStore } from './gateway.js';
 
 const ORG = 'org-1';
 const USER = 'user-1';
+const REF = { org_id: ORG, user_id: USER, slot: 1 };
 let dataDir: string;
 
 const agentDir = () => path.join(dataDir, 'gateways', ORG, USER, 'agents', 'main', 'agent');
@@ -76,11 +77,11 @@ describe('reconcileAuthProfileStore', () => {
   it('drops a profile whose source credential was replaced, so the importer re-adds it', () => {
     createStore({ 'openai:oauth': oauth() });
     // First reconcile only records what the importer already has.
-    reconcileAuthProfileStore(ORG, USER, { 'openai:oauth': oauth() }, { 'openai:oauth': 'fp-a' });
+    reconcileAuthProfileStore(REF, { 'openai:oauth': oauth() }, { 'openai:oauth': 'fp-a' });
     expect(readStore()['openai:oauth']).toBeDefined();
 
     // Operator pastes a new auth.json -> different fingerprint.
-    reconcileAuthProfileStore(ORG, USER, { 'openai:oauth': oauth() }, { 'openai:oauth': 'fp-b' });
+    reconcileAuthProfileStore(REF, { 'openai:oauth': oauth() }, { 'openai:oauth': 'fp-b' });
 
     expect(readStore()['openai:oauth']).toBeUndefined();
   });
@@ -90,10 +91,10 @@ describe('reconcileAuthProfileStore', () => {
     // rotates the refresh token as it does — so the store being newer than our
     // file is normal, and re-importing would restore a dead token.
     createStore({ 'openai:oauth': oauth() });
-    reconcileAuthProfileStore(ORG, USER, { 'openai:oauth': oauth() }, { 'openai:oauth': 'fp-a' });
+    reconcileAuthProfileStore(REF, { 'openai:oauth': oauth() }, { 'openai:oauth': 'fp-a' });
 
     writeStore({ 'openai:oauth': oauth({ access: 'access-refreshed', refresh: 'refresh-rotated' }) });
-    reconcileAuthProfileStore(ORG, USER, { 'openai:oauth': oauth() }, { 'openai:oauth': 'fp-a' });
+    reconcileAuthProfileStore(REF, { 'openai:oauth': oauth() }, { 'openai:oauth': 'fp-a' });
 
     expect(readStore()['openai:oauth'].refresh).toBe('refresh-rotated');
   });
@@ -102,7 +103,7 @@ describe('reconcileAuthProfileStore', () => {
     // First run after this shipped: we cannot tell a replaced key from a
     // refreshed one, so leave the gateway alone rather than risk a rewind.
     createStore({ 'openai:oauth': oauth({ refresh: 'refresh-rotated' }) });
-    reconcileAuthProfileStore(ORG, USER, { 'openai:oauth': oauth() }, { 'openai:oauth': 'fp-a' });
+    reconcileAuthProfileStore(REF, { 'openai:oauth': oauth() }, { 'openai:oauth': 'fp-a' });
 
     expect(readStore()['openai:oauth'].refresh).toBe('refresh-rotated');
     expect(JSON.parse(fs.readFileSync(fingerprintPath(), 'utf-8'))).toEqual({ 'openai:oauth': 'fp-a' });
@@ -111,13 +112,13 @@ describe('reconcileAuthProfileStore', () => {
   it('leaves profiles it does not mint alone', () => {
     // e.g. one the user created themselves through the OpenClaw CLI.
     createStore({ 'copilot:cli-login': { type: 'api_key', provider: 'copilot', key: 'user-owned' } });
-    reconcileAuthProfileStore(ORG, USER, {}, {});
+    reconcileAuthProfileStore(REF, {}, {});
 
     expect(readStore()['copilot:cli-login']).toBeDefined();
   });
 
   it('records fingerprints when there is no store yet', () => {
-    reconcileAuthProfileStore(ORG, USER, { 'openai:oauth': oauth() }, { 'openai:oauth': 'fp-a' });
+    reconcileAuthProfileStore(REF, { 'openai:oauth': oauth() }, { 'openai:oauth': 'fp-a' });
     expect(JSON.parse(fs.readFileSync(fingerprintPath(), 'utf-8'))).toEqual({ 'openai:oauth': 'fp-a' });
   });
 
@@ -129,7 +130,7 @@ describe('reconcileAuthProfileStore', () => {
     fs.writeFileSync(storePath(), 'this is not a database');
 
     expect(() =>
-      reconcileAuthProfileStore(ORG, USER, { 'openai:oauth': oauth() }, { 'openai:oauth': 'fp-a' }),
+      reconcileAuthProfileStore(REF, { 'openai:oauth': oauth() }, { 'openai:oauth': 'fp-a' }),
     ).not.toThrow();
     expect(fs.existsSync(fingerprintPath())).toBe(false);
   });

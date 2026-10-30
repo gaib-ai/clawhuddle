@@ -1,0 +1,452 @@
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import Fastify, { type FastifyInstance } from 'fastify';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { signApiToken } from '@clawhuddle/shared';
+
+/**
+ * Instances through the API: the limit is enforced for members and admins
+ * alike, a member can only touch their own instances, and tokens are released
+ * only one at a time to an admin who asks. Docker is stubbed; the container
+ * names handed to it are what prove slot naming.
+ */
+
+const docker = vi.hoisted(() => ({
+  created: [] as string[],
+  /** Container names handed to `restart`. */
+  restarted: [] as string[],
+  /** Every `exec` Cmd, in order. */
+  execs: [] as string[][],
+  /** What `openclaw devices list --json` prints inside the stub container. */
+  devicesJson: '{"pending":[],"paired":[]}',
+}));
+vi.mock('dockerode', () => {
+  // A docker exec stream without a TTY is framed: type byte, 3 zero bytes,
+  // big-endian length, payload. The service must demux it.
+  const frame = (type: number, text: string) => {
+    const body = Buffer.from(text, 'utf-8');
+    const head = Buffer.alloc(8);
+    head[0] = type;
+    head.writeUInt32BE(body.length, 4);
+    return Buffer.concat([head, body]);
+  };
+  class Container {
+    constructor(public name: string) {}
+    async stop() {}
+    async remove() {}
+    async start() {}
+    async restart() { docker.restarted.push(this.name); }
+    async inspect() {
+      return { State: { Running: true }, NetworkSettings: { Ports: {} } };
+    }
+    async exec(opts: { Cmd: string[] }) {
+      docker.execs.push(opts.Cmd);
+      const isList = opts.Cmd.slice(0, 3).join(' ') === 'openclaw devices list';
+      const chunks = isList
+        ? [frame(2, 'warn: something on stderr\n'), frame(1, docker.devicesJson.slice(0, 10)), frame(1, docker.devicesJson.slice(10))]
+        : [];
+      return {
+        start: async () => ({
+          resume() {},
+          on(event: string, cb: (chunk?: Buffer) => void) {
+            if (event === 'data') for (const c of chunks) cb(c);
+            if (event === 'end') setTimeout(cb, 0);
+          },
+        }),
+        inspect: async () => ({ ExitCode: 0 }),
+      };
+    }
+  }
+  class Docker {
+    getNetwork() { return { inspect: async () => ({}) }; }
+    async createNetwork() {}
+    getContainer(name: string) { return new Container(name); }
+    async createContainer(cfg: { name: string }) { docker.created.push(cfg.name); return new Container(cfg.name); }
+    async listContainers() { return []; }
+  }
+  return { default: Docker };
+});
+
+const SECRET = 'test-secret-'.padEnd(48, 'x');
+const ORG = 'org-1';
+const OWNER = { id: 'user-owner', email: 'owner@example.com' };
+const ADMIN = { id: 'user-admin', email: 'admin@example.com' };
+const MEMBER = { id: 'user-member', email: 'member@example.com' };
+const OTHER = { id: 'user-other', email: 'other@example.com' };
+const om = (u: { id: string }) => `om-${u.id}`;
+
+let tmpDir: string;
+let app: FastifyInstance;
+
+const as = async (user: { id: string }) => ({
+  authorization: `Bearer ${(await signApiToken(user.id, 'user', SECRET, 3600)).token}`,
+});
+
+beforeAll(async () => {
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clawhuddle-gateways-'));
+  process.env.DATABASE_PATH = path.join(tmpDir, 'db.sqlite');
+  process.env.DATA_DIR = path.join(tmpDir, 'data');
+  process.env.API_AUTH_SECRET = SECRET;
+  process.env.DOMAIN = 'app.example.com';
+  process.env.GATEWAY_DOMAIN = 'example.com';
+  delete process.env.MAX_GATEWAYS_PER_USER;
+
+  const { getDb } = await import('../../db/index.js');
+  const { applyMigrations } = await import('../../db/apply-migrations.js');
+  const db = getDb();
+  applyMigrations(db, () => {});
+  db.prepare('INSERT INTO organizations (id, name, slug) VALUES (?, ?, ?)').run(ORG, 'Org', 'org');
+  for (const [u, role] of [[OWNER, 'owner'], [ADMIN, 'admin'], [MEMBER, 'member'], [OTHER, 'member']] as const) {
+    db.prepare('INSERT INTO users (id, email) VALUES (?, ?)').run(u.id, u.email);
+    db.prepare('INSERT INTO org_members (id, org_id, user_id, role) VALUES (?, ?, ?, ?)').run(om(u), ORG, u.id, role);
+  }
+  // deploy refuses an instance with no provider key at all
+  db.prepare("INSERT INTO api_keys (id, provider, key_value, org_id, credential_type) VALUES ('k1', 'google', ?, ?, 'api_key')")
+    .run(Buffer.from('AIza-test').toString('base64'), ORG);
+
+  const { authRoutes } = await import('../auth.js');
+  const { orgRoutes } = await import('../orgs.js');
+  const { orgPlugin } = await import('../../middleware/auth.js');
+  const { orgMemberRoutes } = await import('./members.js');
+  const { orgGatewayRoutes } = await import('./gateways.js');
+  app = Fastify();
+  await app.register(authRoutes);
+  await app.register(orgRoutes);
+  await app.register(async (instance) => {
+    await instance.register(orgPlugin);
+    await instance.register(orgMemberRoutes);
+    await instance.register(orgGatewayRoutes);
+  });
+  await app.ready();
+});
+
+afterAll(async () => {
+  await app?.close();
+  const { closeDb } = await import('../../db/index.js');
+  closeDb();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+const createOwn = async (user: { id: string }, body: Record<string, unknown> = {}) =>
+  app.inject({ method: 'POST', url: `/api/orgs/${ORG}/me/gateways`, headers: await as(user), payload: body });
+const createFor = async (by: { id: string }, target: { id: string }) =>
+  app.inject({ method: 'POST', url: `/api/orgs/${ORG}/gateways/members/${om(target)}`, headers: await as(by), payload: {} });
+const mine = async (user: { id: string }) =>
+  (await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/me/gateways`, headers: await as(user) })).json();
+
+describe('creating instances', () => {
+  it('deploys the first instance under the legacy container name', async () => {
+    const res = await createOwn(MEMBER, { label: 'main' });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().data).toMatchObject({ slot: 1, label: 'main', status: 'deploying', member_id: om(MEMBER) });
+    expect(res.json().data).not.toHaveProperty('token');
+    expect(docker.created).toEqual(['clawhuddle-gw-org-1-user-mem']);
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'gateways', ORG, MEMBER.id, 'openclaw.json'))).toBe(true);
+  });
+
+  it('refuses a second one at the default limit', async () => {
+    const res = await createOwn(MEMBER);
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toMatchObject({ error: 'gateway_limit', limit: 1, current: 1 });
+  });
+
+  it('allows it once an admin raises the org limit, with a suffixed name and directory', async () => {
+    const raise = await app.inject({
+      method: 'PATCH', url: `/api/orgs/${ORG}`, headers: await as(OWNER), payload: { max_gateways_per_user: 2 },
+    });
+    expect(raise.statusCode).toBe(200);
+    expect(raise.json().data.max_gateways_per_user).toBe(2);
+
+    const res = await createOwn(MEMBER);
+    expect(res.statusCode).toBe(201);
+    expect(res.json().data.slot).toBe(2);
+    expect(docker.created.at(-1)).toBe('clawhuddle-gw-org-1-user-mem-2');
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'gateways', ORG, `${MEMBER.id}-2`, 'openclaw.json'))).toBe(true);
+    expect(await mine(MEMBER)).toMatchObject({ limit: 2, current: 2 });
+  });
+
+  it('lets a per-member override lower the limit again', async () => {
+    const res = await app.inject({
+      method: 'PATCH', url: `/api/orgs/${ORG}/members/${om(MEMBER)}`, headers: await as(ADMIN), payload: { max_gateways: 1 },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.max_gateways).toBe(1);
+    expect((await createOwn(MEMBER)).statusCode).toBe(403);
+    expect(await mine(MEMBER)).toMatchObject({ limit: 1, current: 2 });
+  });
+
+  it('rejects a nonsense limit', async () => {
+    const res = await app.inject({
+      method: 'PATCH', url: `/api/orgs/${ORG}/members/${om(MEMBER)}`, headers: await as(ADMIN), payload: { max_gateways: 0 },
+    });
+    expect(res.statusCode).toBe(400);
+    expect((await app.inject({
+      method: 'PATCH', url: `/api/orgs/${ORG}`, headers: await as(OWNER), payload: { max_gateways_per_user: 'many' },
+    })).statusCode).toBe(400);
+  });
+
+  it('holds admins to the same limit when deploying for a member', async () => {
+    expect((await createFor(ADMIN, OTHER)).statusCode).toBe(201);
+    expect((await createFor(ADMIN, OTHER)).statusCode).toBe(201);
+    const res = await createFor(ADMIN, OTHER);
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe('gateway_limit');
+  });
+});
+
+describe('who may touch an instance', () => {
+  it("keeps a member off another member's instance", async () => {
+    const theirs = (await mine(OTHER)).data[0].id;
+    for (const [method, suffix] of [['POST', '/stop'], ['GET', '/status'], ['DELETE', ''], ['GET', '/channels']] as const) {
+      const res = await app.inject({ method, url: `/api/orgs/${ORG}/gateways/${theirs}${suffix}`, headers: await as(MEMBER) });
+      expect(res.statusCode, `${method} ${suffix}`).toBe(403);
+    }
+    expect((await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/gateways/${theirs}/access`, headers: await as(MEMBER) })).statusCode).toBe(403);
+  });
+
+  it('404s an unknown instance before anything else', async () => {
+    const res = await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/gateways/nope/status`, headers: await as(OWNER) });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('lets an admin act on a member instance, and the member see its status', async () => {
+    const theirs = (await mine(OTHER)).data[0].id;
+    const stop = await app.inject({ method: 'POST', url: `/api/orgs/${ORG}/gateways/${theirs}/stop`, headers: await as(ADMIN) });
+    expect(stop.statusCode).toBe(200);
+    expect(stop.json().data.status).toBe('stopped');
+    const status = await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/gateways/${theirs}/status`, headers: await as(OTHER) });
+    expect(status.json().data.status).toBe('running'); // the stub container reports healthy
+  });
+
+  it('restarts an instance in place without recreating its container', async () => {
+    const theirs = (await mine(OTHER)).data[0].id;
+    const before = docker.created.length;
+    const res = await app.inject({ method: 'POST', url: `/api/orgs/${ORG}/gateways/${theirs}/restart`, headers: await as(OTHER) });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.status).toBe('deploying');
+    expect(docker.restarted).toEqual(['clawhuddle-gw-org-1-user-oth']);
+    expect(docker.created.length).toBe(before);
+    const denied = await app.inject({ method: 'POST', url: `/api/orgs/${ORG}/gateways/${theirs}/restart`, headers: await as(MEMBER) });
+    expect(denied.statusCode).toBe(403);
+  });
+
+  it("releases an owner's token only to an owner", async () => {
+    expect((await createFor(OWNER, OWNER)).statusCode).toBe(201);
+    expect((await createFor(OWNER, ADMIN)).statusCode).toBe(201);
+    const ownersInstance = (await mine(OWNER)).data[0];
+    const adminsInstance = (await mine(ADMIN)).data[0];
+
+    const byAdmin = await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/gateways/${ownersInstance.id}/access`, headers: await as(ADMIN) });
+    expect(byAdmin.statusCode).toBe(403);
+
+    const byOwner = await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/gateways/${adminsInstance.id}/access`, headers: await as(OWNER) });
+    expect(byOwner.statusCode).toBe(200);
+    expect(byOwner.json().data).toEqual({ gateway_token: adminsInstance.token, gateway_subdomain: adminsInstance.subdomain, gateway_port: 6100 });
+    expect(byOwner.headers['cache-control']).toBe('no-store');
+  });
+
+  it('lists every instance for admins without tokens', async () => {
+    const res = await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/gateways`, headers: await as(ADMIN) });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toHaveLength(6);
+    for (const g of res.json().data) {
+      expect(g).not.toHaveProperty('token');
+      expect(g.email).toBeDefined();
+    }
+    expect((await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/gateways`, headers: await as(MEMBER) })).statusCode).toBe(403);
+  });
+
+  it('attaches instances to the members list, tokens stripped', async () => {
+    const res = await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/members`, headers: await as(MEMBER) });
+    const member = res.json().data.find((m: any) => m.id === om(MEMBER));
+    expect(member.gateway_count).toBe(2);
+    expect(member.effective_max_gateways).toBe(1);
+    expect(member.gateways.map((g: any) => g.slot)).toEqual([1, 2]);
+    expect(member.gateways[0]).not.toHaveProperty('token');
+  });
+});
+
+describe('instance settings and channels', () => {
+  it('renames an instance and pins its provider', async () => {
+    const second = (await mine(MEMBER)).data[1];
+    const res = await app.inject({
+      method: 'PATCH', url: `/api/orgs/${ORG}/gateways/${second.id}`, headers: await as(MEMBER),
+      payload: { label: 'research', primary_provider: 'google' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toMatchObject({ label: 'research', primary_provider: 'google' });
+    const config = JSON.parse(fs.readFileSync(path.join(tmpDir, 'data', 'gateways', ORG, `${MEMBER.id}-2`, 'openclaw.json'), 'utf-8'));
+    expect(config.agents.defaults.model.primary).toMatch(/^google\//);
+
+    const bad = await app.inject({
+      method: 'PATCH', url: `/api/orgs/${ORG}/gateways/${second.id}`, headers: await as(MEMBER), payload: { primary_provider: 'nope' },
+    });
+    expect(bad.statusCode).toBe(400);
+  });
+
+  it('pins a model by name, which replaces the provider pin', async () => {
+    const second = (await mine(MEMBER)).data[1];
+    const res = await app.inject({
+      method: 'PATCH', url: `/api/orgs/${ORG}/gateways/${second.id}`, headers: await as(MEMBER),
+      payload: { primary_model: 'google/gemini-4-argon' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toMatchObject({ primary_model: 'google/gemini-4-argon', primary_provider: null });
+    const config = JSON.parse(fs.readFileSync(path.join(tmpDir, 'data', 'gateways', ORG, `${MEMBER.id}-2`, 'openclaw.json'), 'utf-8'));
+    expect(config.agents.defaults.model.primary).toBe('google/gemini-4-argon');
+
+    const bad = await app.inject({
+      method: 'PATCH', url: `/api/orgs/${ORG}/gateways/${second.id}`, headers: await as(MEMBER), payload: { primary_model: 'google/nope' },
+    });
+    expect(bad.statusCode).toBe(400);
+
+    const cleared = await app.inject({
+      method: 'PATCH', url: `/api/orgs/${ORG}/gateways/${second.id}`, headers: await as(MEMBER), payload: { primary_model: null },
+    });
+    expect(cleared.json().data.primary_model).toBeNull();
+  });
+
+  it('keeps bot tokens per instance', async () => {
+    const [first, second] = (await mine(MEMBER)).data;
+    const put = (id: string, channel: string, body: Record<string, unknown>) =>
+      as(MEMBER).then((headers) => app.inject({ method: 'PUT', url: `/api/orgs/${ORG}/gateways/${id}/channels/${channel}`, headers, payload: body }));
+
+    expect((await put(second.id, 'slack', { bot_token: 'xoxb' })).statusCode).toBe(400); // needs app_token
+    expect((await put(second.id, 'slack', { bot_token: 'xoxb-2', app_token: 'xapp-2' })).statusCode).toBe(200);
+
+    const onFirst = await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/gateways/${first.id}/channels`, headers: await as(MEMBER) });
+    expect(onFirst.json().data).toEqual([]);
+    const onSecond = await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/gateways/${second.id}/channels`, headers: await as(MEMBER) });
+    expect(onSecond.json().data).toMatchObject([{ channel: 'slack', configured: true }]);
+    const config = JSON.parse(fs.readFileSync(path.join(tmpDir, 'data', 'gateways', ORG, `${MEMBER.id}-2`, 'openclaw.json'), 'utf-8'));
+    expect(config.channels.slack.botToken).toBe('xoxb-2');
+
+    const del = await app.inject({ method: 'DELETE', url: `/api/orgs/${ORG}/gateways/${second.id}/channels/slack`, headers: await as(MEMBER) });
+    expect(del.statusCode).toBe(200);
+    expect((await app.inject({ method: 'DELETE', url: `/api/orgs/${ORG}/gateways/${second.id}/channels/slack`, headers: await as(MEMBER) })).statusCode).toBe(404);
+  });
+});
+
+describe('removing an instance', () => {
+  it('takes the row and the workspace with it, and frees the slot', async () => {
+    const second = (await mine(MEMBER)).data[1];
+    const res = await app.inject({ method: 'DELETE', url: `/api/orgs/${ORG}/gateways/${second.id}`, headers: await as(MEMBER) });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toMatchObject({ id: second.id, slot: 2, removed: true });
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'gateways', ORG, `${MEMBER.id}-2`))).toBe(false);
+    expect(await mine(MEMBER)).toMatchObject({ current: 1 });
+    expect((await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/gateways/${second.id}/status`, headers: await as(MEMBER) })).statusCode).toBe(404);
+  });
+
+  it('removes a member along with every instance they own', async () => {
+    const before = (await mine(OTHER)).data;
+    expect(before).toHaveLength(2);
+    const res = await app.inject({ method: 'DELETE', url: `/api/orgs/${ORG}/members/${om(OTHER)}`, headers: await as(OWNER) });
+    expect(res.statusCode).toBe(200);
+    const { getDb } = await import('../../db/index.js');
+    expect(getDb().prepare('SELECT COUNT(*) AS n FROM gateways WHERE member_id = ?').get(om(OTHER))).toEqual({ n: 0 });
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'gateways', ORG, OTHER.id))).toBe(false);
+  });
+});
+
+describe('device pairing', () => {
+  const PENDING = {
+    requestId: '0f6f2c1e-6a3e-4d4c-9b1c-0f3f2b9d1a11',
+    deviceId: 'dev-1',
+    publicKey: 'SHOULD-NOT-LEAK',
+    displayName: 'Chrome on Mac',
+    platform: 'MacIntel',
+    deviceFamily: 'Mac',
+    clientId: 'openclaw-control-ui',
+    clientMode: 'webchat',
+    browserOrigin: 'https://claw-abc.example.com',
+    role: 'operator',
+    roles: ['operator'],
+    scopes: ['operator.read', 'operator.write'],
+    remoteIp: '203.0.113.9',
+    ts: 1760000000000,
+  };
+  let membersInstance: string;
+
+  beforeAll(async () => {
+    const { getDb } = await import('../../db/index.js');
+    getDb().prepare("UPDATE gateways SET status = 'running'").run();
+    // OTHER was removed from the org above; bring them back as a plain member
+    getDb().prepare('INSERT INTO org_members (id, org_id, user_id, role) VALUES (?, ?, ?, ?)').run(om(OTHER), ORG, OTHER.id, 'member');
+    membersInstance = (await mine(MEMBER)).data[0].id;
+    docker.devicesJson = JSON.stringify({ pending: [PENDING], paired: [] });
+  });
+
+  it('shows a member the devices waiting on their own instance, public key stripped', async () => {
+    const res = await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/gateways/${membersInstance}/devices`, headers: await as(MEMBER) });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toHaveLength(1);
+    expect(res.json().data[0]).toMatchObject({ requestId: PENDING.requestId, displayName: 'Chrome on Mac', remoteIp: '203.0.113.9', scopes: ['operator.read', 'operator.write'] });
+    expect(res.json().data[0]).not.toHaveProperty('publicKey');
+  });
+
+  it("keeps a member off another member's device requests", async () => {
+    const res = await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/gateways/${membersInstance}/devices`, headers: await as(OTHER) });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('collects my requests across my instances, tagged with the instance but not its token', async () => {
+    const res = await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/me/device-requests`, headers: await as(MEMBER) });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.errors).toEqual([]);
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0].gateway).toMatchObject({ id: membersInstance, slot: 1 });
+    expect(body.data[0].gateway).not.toHaveProperty('token');
+  });
+
+  it('lets admins see every request in the org with the member, and nobody else', async () => {
+    const res = await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/device-requests`, headers: await as(ADMIN) });
+    expect(res.statusCode).toBe(200);
+    const forMember = res.json().data.find((r: any) => r.gateway.id === membersInstance);
+    expect(forMember.gateway.email).toBe(MEMBER.email);
+    expect(forMember.gateway).not.toHaveProperty('token');
+    // every running instance was asked once
+    const asked = docker.execs.filter((c) => c[2] === 'list').length;
+    expect(asked).toBeGreaterThanOrEqual(res.json().data.length);
+
+    const denied = await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/device-requests`, headers: await as(MEMBER) });
+    expect(denied.statusCode).toBe(403);
+  });
+
+  it('approves and rejects by request id inside the container, and logs nothing else through', async () => {
+    docker.execs.length = 0;
+    const ok = await app.inject({ method: 'POST', url: `/api/orgs/${ORG}/gateways/${membersInstance}/devices/${PENDING.requestId}/approve`, headers: await as(MEMBER) });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().data).toEqual({ requestId: PENDING.requestId, approved: true });
+    expect(docker.execs).toEqual([['openclaw', 'devices', 'approve', PENDING.requestId, '--json']]);
+
+    const byAdmin = await app.inject({ method: 'POST', url: `/api/orgs/${ORG}/gateways/${membersInstance}/devices/${PENDING.requestId}/reject`, headers: await as(ADMIN) });
+    expect(byAdmin.statusCode).toBe(200);
+    expect(docker.execs[1]).toEqual(['openclaw', 'devices', 'reject', PENDING.requestId, '--json']);
+
+    const bad = await app.inject({ method: 'POST', url: `/api/orgs/${ORG}/gateways/${membersInstance}/devices/${encodeURIComponent('x; rm -rf /')}/approve`, headers: await as(MEMBER) });
+    expect(bad.statusCode).toBe(400);
+    expect(docker.execs).toHaveLength(2);
+  });
+
+  it('reports an instance that cannot be read instead of failing the list', async () => {
+    docker.devicesJson = 'not json at all';
+    const res = await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/me/device-requests`, headers: await as(MEMBER) });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toEqual([]);
+    expect(res.json().errors).toEqual([{ gateway_id: membersInstance, message: expect.stringContaining('JSON') }]);
+    docker.devicesJson = '{"pending":[],"paired":[]}';
+  });
+
+  it('has nothing to show for a stopped instance', async () => {
+    const { getDb } = await import('../../db/index.js');
+    getDb().prepare("UPDATE gateways SET status = 'stopped' WHERE id = ?").run(membersInstance);
+    const res = await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/gateways/${membersInstance}/devices`, headers: await as(MEMBER) });
+    expect(res.json().data).toEqual([]);
+    const approve = await app.inject({ method: 'POST', url: `/api/orgs/${ORG}/gateways/${membersInstance}/devices/${PENDING.requestId}/approve`, headers: await as(MEMBER) });
+    expect(approve.statusCode).toBe(400);
+    getDb().prepare("UPDATE gateways SET status = 'running' WHERE id = ?").run(membersInstance);
+  });
+});

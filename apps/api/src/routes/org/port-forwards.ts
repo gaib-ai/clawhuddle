@@ -9,6 +9,7 @@ import {
   reservedSubdomainReason,
   type PortForward,
 } from '../../services/port-forward.js';
+import { findGatewayRow } from '../../services/gateway-store.js';
 
 const SUBDOMAIN_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const MAX_DESCRIPTION_LENGTH = 200;
@@ -32,10 +33,12 @@ export async function orgPortForwardRoutes(app: FastifyInstance) {
     async (request) => {
       const db = getDb();
       const rows = db.prepare(
-        `SELECT pf.*, u.email AS member_email, u.name AS member_name, om.gateway_status
+        `SELECT pf.*, u.email AS member_email, u.name AS member_name,
+                g.status AS gateway_status, g.label AS gateway_label, g.slot AS gateway_slot
          FROM port_forwards pf
          JOIN org_members om ON om.id = pf.member_id
          JOIN users u ON u.id = om.user_id
+         LEFT JOIN gateways g ON g.id = pf.gateway_id
          WHERE pf.org_id = ?
          ORDER BY pf.created_at DESC`
       ).all(request.orgId!) as any[];
@@ -48,14 +51,14 @@ export async function orgPortForwardRoutes(app: FastifyInstance) {
   );
 
   // Create port forward (admin+ only)
-  app.post<{ Body: { memberId?: string; subdomain?: string; port?: number; description?: string } }>(
+  app.post<{ Body: { gatewayId?: string; subdomain?: string; port?: number; description?: string } }>(
     '/api/orgs/:orgId/port-forwards',
     { preHandler: requireRole('owner', 'admin') },
     async (request, reply) => {
-      const { memberId, subdomain, port, description } = request.body || {};
+      const { gatewayId, subdomain, port, description } = request.body || {};
 
-      if (!memberId || !subdomain || !port) {
-        return reply.status(400).send({ error: 'validation', message: 'memberId, subdomain and port are required' });
+      if (!gatewayId || !subdomain || !port) {
+        return reply.status(400).send({ error: 'validation', message: 'gatewayId, subdomain and port are required' });
       }
       const normalized = subdomain.trim().toLowerCase();
       if (!SUBDOMAIN_RE.test(normalized)) {
@@ -78,16 +81,14 @@ export async function orgPortForwardRoutes(app: FastifyInstance) {
       }
 
       const db = getDb();
-      const member = db
-        .prepare('SELECT id FROM org_members WHERE id = ? AND org_id = ?')
-        .get(memberId, request.orgId!);
-      if (!member) {
-        return reply.status(404).send({ error: 'not_found', message: 'Member not found' });
+      const gateway = findGatewayRow(request.orgId!, gatewayId);
+      if (!gateway) {
+        return reply.status(404).send({ error: 'not_found', message: 'Gateway not found' });
       }
 
       // Subdomain must not collide with another forward or a gateway subdomain
       const existingForward = db.prepare('SELECT id FROM port_forwards WHERE subdomain = ?').get(normalized);
-      const existingGateway = db.prepare('SELECT id FROM org_members WHERE gateway_subdomain = ?').get(normalized);
+      const existingGateway = db.prepare('SELECT id FROM gateways WHERE subdomain = ?').get(normalized);
       if (existingForward || existingGateway) {
         return reply.status(409).send({ error: 'conflict', message: 'Subdomain is already in use' });
       }
@@ -95,7 +96,8 @@ export async function orgPortForwardRoutes(app: FastifyInstance) {
       const pf: PortForward = {
         id: uuid(),
         org_id: request.orgId!,
-        member_id: memberId,
+        member_id: gateway.member_id,
+        gateway_id: gateway.id,
         subdomain: normalized,
         port: portNum,
         description: description?.trim() || null,
@@ -109,8 +111,8 @@ export async function orgPortForwardRoutes(app: FastifyInstance) {
       }
 
       db.prepare(
-        'INSERT INTO port_forwards (id, org_id, member_id, subdomain, port, description) VALUES (?, ?, ?, ?, ?, ?)'
-      ).run(pf.id, pf.org_id, pf.member_id, pf.subdomain, pf.port, pf.description);
+        'INSERT INTO port_forwards (id, org_id, member_id, gateway_id, subdomain, port, description) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      ).run(pf.id, pf.org_id, pf.member_id, pf.gateway_id, pf.subdomain, pf.port, pf.description);
 
       return reply.status(201).send({ data: { ...pf, hostname: portForwardHostname(pf.subdomain) } });
     }
@@ -119,7 +121,7 @@ export async function orgPortForwardRoutes(app: FastifyInstance) {
   // Update port forward (admin+ only)
   app.patch<{
     Params: { orgId: string; forwardId: string };
-    Body: { memberId?: string; subdomain?: string; port?: number; description?: string | null };
+    Body: { gatewayId?: string; subdomain?: string; port?: number; description?: string | null };
   }>(
     '/api/orgs/:orgId/port-forwards/:forwardId',
     { preHandler: requireRole('owner', 'admin') },
@@ -133,17 +135,16 @@ export async function orgPortForwardRoutes(app: FastifyInstance) {
         return reply.status(404).send({ error: 'not_found', message: 'Port forward not found' });
       }
 
-      const { memberId, subdomain, port, description } = request.body || {};
+      const { gatewayId, subdomain, port, description } = request.body || {};
       const updated: PortForward = { ...existing };
 
-      if (memberId !== undefined) {
-        const member = db
-          .prepare('SELECT id FROM org_members WHERE id = ? AND org_id = ?')
-          .get(memberId, request.orgId!);
-        if (!member) {
-          return reply.status(404).send({ error: 'not_found', message: 'Member not found' });
+      if (gatewayId !== undefined) {
+        const gateway = findGatewayRow(request.orgId!, gatewayId);
+        if (!gateway) {
+          return reply.status(404).send({ error: 'not_found', message: 'Gateway not found' });
         }
-        updated.member_id = memberId;
+        updated.member_id = gateway.member_id;
+        updated.gateway_id = gateway.id;
       }
 
       if (subdomain !== undefined) {
@@ -162,7 +163,7 @@ export async function orgPortForwardRoutes(app: FastifyInstance) {
           .prepare('SELECT id FROM port_forwards WHERE subdomain = ? AND id != ?')
           .get(normalized, forwardId);
         const conflictGateway = db
-          .prepare('SELECT id FROM org_members WHERE gateway_subdomain = ?')
+          .prepare('SELECT id FROM gateways WHERE subdomain = ?')
           .get(normalized);
         if (conflictForward || conflictGateway) {
           return reply.status(409).send({ error: 'conflict', message: 'Subdomain is already in use' });
@@ -193,8 +194,8 @@ export async function orgPortForwardRoutes(app: FastifyInstance) {
       }
 
       db.prepare(
-        'UPDATE port_forwards SET member_id = ?, subdomain = ?, port = ?, description = ? WHERE id = ?'
-      ).run(updated.member_id, updated.subdomain, updated.port, updated.description, updated.id);
+        'UPDATE port_forwards SET member_id = ?, gateway_id = ?, subdomain = ?, port = ?, description = ? WHERE id = ?'
+      ).run(updated.member_id, updated.gateway_id, updated.subdomain, updated.port, updated.description, updated.id);
 
       return { data: { ...updated, hostname: portForwardHostname(updated.subdomain) } };
     }

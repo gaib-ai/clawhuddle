@@ -3,7 +3,6 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { signApiToken, verifyApiToken } from '@clawhuddle/shared';
 
 /**
@@ -33,14 +32,18 @@ beforeAll(async () => {
 
   const { getDb } = await import('../db/index.js');
   const db = getDb();
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  db.exec(fs.readFileSync(path.join(here, '../db/schema.sql'), 'utf-8'));
+  const { applyMigrations } = await import('../db/apply-migrations.js');
+  applyMigrations(db, () => {});
   db.prepare('INSERT INTO organizations (id, name, slug) VALUES (?, ?, ?)').run(ORG, 'Org', 'org');
   for (const [u, role] of [[ADMIN, 'owner'], [MEMBER, 'member'], [OTHER_ADMIN, 'admin']] as const) {
     db.prepare('INSERT INTO users (id, email) VALUES (?, ?)').run(u.id, u.email);
+    db.prepare('INSERT INTO org_members (id, org_id, user_id, role) VALUES (?, ?, ?, ?)').run(`om-${u.id}`, ORG, u.id, role);
+    // The slot-1 row is mirrored onto org_members.gateway_token by the store;
+    // seeding both directly stands in for that.
     db.prepare(
-      'INSERT INTO org_members (id, org_id, user_id, role, gateway_token) VALUES (?, ?, ?, ?, ?)',
-    ).run(`om-${u.id}`, ORG, u.id, role, u.token);
+      "INSERT INTO gateways (id, org_id, member_id, slot, status, port, token, subdomain) VALUES (?, ?, ?, 1, 'running', 6100, ?, ?)",
+    ).run(`gw-om-${u.id}`, ORG, `om-${u.id}`, u.token, `claw-${u.id}`);
+    db.prepare('UPDATE org_members SET gateway_token = ? WHERE id = ?').run(u.token, `om-${u.id}`);
   }
 
   const { authRoutes } = await import('../routes/auth.js');
@@ -184,7 +187,7 @@ describe('admin gateway access', () => {
   const access = async (viewerId: string, target: { id: string }) =>
     app.inject({
       method: 'GET',
-      url: `/api/orgs/${ORG}/gateways/members/om-${target.id}/access`,
+      url: `/api/orgs/${ORG}/gateways/gw-om-${target.id}/access`,
       headers: bearer(await userToken(viewerId)),
     });
 
@@ -205,5 +208,19 @@ describe('admin gateway access', () => {
 
   it('refuses plain members', async () => {
     expect((await access(MEMBER.id, OTHER_ADMIN)).statusCode).toBe(403);
+  });
+
+  it('never lists tokens for admins', async () => {
+    const res = await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/gateways`, headers: bearer(await userToken(ADMIN.id)) });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toHaveLength(3);
+    for (const g of res.json().data) expect(g).not.toHaveProperty('token');
+  });
+
+  it("gives a member their own instance's token", async () => {
+    const res = await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/me/gateways`, headers: bearer(await userToken(MEMBER.id)) });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.map((g: { token: string }) => g.token)).toEqual([MEMBER.token]);
+    expect(res.json()).toMatchObject({ limit: 1, current: 1 });
   });
 });

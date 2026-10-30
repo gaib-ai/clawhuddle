@@ -1,45 +1,8 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { getDb, closeDb } from './index.js';
+import { applyMigrations } from './apply-migrations.js';
 import dotenv from 'dotenv';
 dotenv.config({ path: '../../.env' });
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-const db = getDb();
-
-// Run base schema
-const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf-8');
-db.exec(schema);
-
-// Run migration files in order
-const migrationsDir = path.join(__dirname, 'migrations');
-if (fs.existsSync(migrationsDir)) {
-  const files = fs.readdirSync(migrationsDir)
-    .filter((f) => f.endsWith('.sql'))
-    .sort();
-
-  for (const file of files) {
-    const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf-8');
-    try {
-      db.exec(sql);
-      console.log(`Migration applied: ${file}`);
-    } catch (err: any) {
-      // Ignore idempotent errors (duplicate column, table already exists)
-      if (
-        err.message?.includes('duplicate column') ||
-        err.message?.includes('already exists') ||
-        err.message?.includes('no such table') ||
-        err.message?.includes('no such column')
-      ) {
-        console.log(`Migration skipped (already applied): ${file}`);
-      } else {
-        throw err;
-      }
-    }
-  }
-}
-
+applyMigrations(getDb());
 closeDb();
 console.log('Database migrated successfully.');

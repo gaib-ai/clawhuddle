@@ -7,6 +7,13 @@ export type OrgTier = 'free' | 'pro' | 'enterprise';
 /** Default member limit per org. Override via MAX_MEMBERS_PER_ORG env var. */
 export const DEFAULT_MAX_MEMBERS = 50;
 
+/**
+ * Default number of gateway instances one member may run. Override platform-wide
+ * via MAX_GATEWAYS_PER_USER; per org via organizations.max_gateways_per_user;
+ * per member via org_members.max_gateways (most specific wins).
+ */
+export const DEFAULT_MAX_GATEWAYS_PER_USER = 1;
+
 // === Database Row Types ===
 
 export interface Organization {
@@ -16,12 +23,24 @@ export interface Organization {
   tier: OrgTier;
   /** Provider id (e.g. "openai-codex") pinned by admin as agents.defaults.model.primary. Null = alphabetical fallback. */
   primary_provider: string | null;
+  /**
+   * Model ref (e.g. "google/gemini-4-argon") pinned by admin within
+   * primary_provider. Null = that provider's default (or the org key's model
+   * override). Cleared whenever primary_provider changes.
+   */
+  primary_model: string | null;
+  /** Gateway instances each member may run. Null = platform default. */
+  max_gateways_per_user: number | null;
   created_at: string;
 }
 
 export interface UpdateOrgRequest {
   /** Pass null to clear the pin and fall back to alphabetical ordering. */
   primary_provider?: string | null;
+  /** One of the pinned provider's MODEL_IDS, or null for the provider default. */
+  primary_model?: string | null;
+  /** Integer >= 1, or null to follow the platform default. */
+  max_gateways_per_user?: number | null;
 }
 
 export interface OrgMember {
@@ -30,14 +49,99 @@ export interface OrgMember {
   user_id: string;
   role: 'owner' | 'admin' | 'member';
   status: 'active' | 'disabled';
+  /**
+   * Mirror of the member's slot-1 gateway (see `Gateway`), kept so an older
+   * platform build still finds the first instance. New code reads `gateways`.
+   */
   gateway_port: number | null;
-  gateway_status: 'running' | 'stopped' | 'deploying' | 'provisioning' | null;
+  gateway_status: GatewayStatus | null;
   gateway_token: string | null;
   gateway_subdomain: string | null;
+  /** Personal primary-provider pin; null = follow the org. */
+  primary_provider?: string | null;
+  /** Per-member cap on gateway instances. Null = follow the org. */
+  max_gateways: number | null;
   joined_at: string;
   email?: string;
   name?: string;
   avatar_url?: string;
+  /** Members list only: this member's instances (tokens stripped) and limit. */
+  gateways?: GatewaySummary[];
+  gateway_count?: number;
+  effective_max_gateways?: number;
+}
+
+export type GatewayStatus = 'running' | 'stopped' | 'deploying' | 'provisioning';
+
+/** One OpenClaw container. A member may own several, numbered by `slot`. */
+export interface Gateway {
+  id: string;
+  org_id: string;
+  member_id: string;
+  slot: number;
+  label: string | null;
+  status: GatewayStatus | null;
+  port: number | null;
+  /** Bearer credential for the Control UI; only returned to the owner or via the access route. */
+  token: string | null;
+  subdomain: string;
+  /** Per-instance primary-provider pin; null = follow the member, then the org. */
+  primary_provider: string | null;
+  /** Per-instance model pin (full ref, provider implied); wins over primary_provider. */
+  primary_model: string | null;
+  created_at: string;
+  container_id?: string | null;
+  user_id?: string;
+  email?: string;
+  name?: string | null;
+  member_role?: string;
+}
+
+export type GatewaySummary = Omit<Gateway, 'token'>;
+
+export interface CreateGatewayRequest {
+  label?: string;
+}
+
+export interface UpdateGatewayRequest {
+  label?: string | null;
+  primary_provider?: string | null;
+  /** Full model ref from MODEL_IDS; its provider is implied. Null = follow the org/member default. */
+  primary_model?: string | null;
+}
+
+/**
+ * A browser or device waiting to be let into an instance's Control UI — one
+ * entry of OpenClaw's `devices list --json` pending list, public key dropped.
+ */
+export interface DevicePairingRequest {
+  requestId: string;
+  deviceId: string;
+  displayName?: string;
+  platform?: string;
+  deviceFamily?: string;
+  clientId?: string;
+  clientMode?: string;
+  browserOrigin?: string;
+  role?: string;
+  roles?: string[];
+  scopes?: string[];
+  remoteIp?: string;
+  /** The device was paired before and is asking again (e.g. after a token reset). */
+  isRepair?: boolean;
+  /** Requested at, epoch ms. */
+  ts: number;
+}
+
+/** A pending request together with the instance it is waiting on. */
+export interface GatewayDeviceRequest extends DevicePairingRequest {
+  gateway: GatewaySummary;
+}
+
+export interface DeviceRequestList {
+  data: GatewayDeviceRequest[];
+  /** Running instances whose pending list could not be read. */
+  errors: { gateway_id: string; message: string }[];
 }
 
 export interface User {
@@ -84,6 +188,8 @@ export interface InviteMemberRequest {
 export interface UpdateMemberRequest {
   role?: 'owner' | 'admin' | 'member';
   status?: 'active' | 'disabled';
+  /** Integer >= 1, or null to follow the org default. */
+  max_gateways?: number | null;
 }
 
 export interface AcceptInviteRequest {
@@ -172,24 +278,24 @@ export interface ProviderConfig {
 export const PROVIDERS: ProviderConfig[] = [
   {
     id: 'google', label: 'Google Gemini', envVar: 'GEMINI_API_KEY', placeholder: 'AIza...',
-    defaultModel: 'google/gemini-4-argon',
+    defaultModel: 'google/gemini-3.8-flash',
+    // Both are declared under models.providers.google by the config generator
+    // (neither is in OpenClaw's own catalog); keep the two lists in step.
     models: [
-      { id: 'google/gemini-4-argon', label: 'Gemini 4 Argon' },
       { id: 'google/gemini-3.8-flash', label: 'Gemini 3.8 Flash' },
-      { id: 'google/gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview' },
-      { id: 'google/gemini-3-flash-preview', label: 'Gemini 3 Flash Preview' },
+      { id: 'google/gemini-4-argon', label: 'Gemini 4 Argon' },
     ],
   },
   {
     id: 'token-kiosk', label: 'Token Kiosk', envVar: '', placeholder: 'sk-...',
     defaultModel: 'tokenkiosk/azure/gpt-5.5',
+    // The pick-list is deliberately short (2026-10-30). The generator still
+    // declares the kiosk models that were offered before, so a key or instance
+    // already pinned to one keeps working.
     models: [
-      { id: 'tokenkiosk/azure/gpt-5.5', label: 'Azure GPT-5.5' },
-      { id: 'tokenkiosk/azure/gpt-5.6-sol', label: 'Azure GPT-5.6 Sol' },
-      { id: 'tokenkiosk/bedrock/kimi-k2.5', label: 'AWS Bedrock Kimi K2.5' },
-      { id: 'tokenkiosk/bedrock/kimi-k2-thinking', label: 'AWS Bedrock Kimi K2 Thinking' },
-      { id: 'tokenkiosk/claude-opus-latest', label: 'Claude Opus (latest)' },
-      { id: 'tokenkiosk/minimax-m3.1-flash:free', label: 'MiniMax M3.1 Flash (free)' },
+      { id: 'tokenkiosk/azure/gpt-5.5', label: 'GPT-5.5' },
+      { id: 'tokenkiosk/claude-sonnet-latest', label: 'Claude Sonnet (latest)' },
+      { id: 'tokenkiosk/minimax-m3.1-flash', label: 'MiniMax M3.1 Flash' },
     ],
   },
   {
@@ -246,6 +352,18 @@ export const PROVIDERS: ProviderConfig[] = [
 ];
 
 export const PROVIDER_IDS = PROVIDERS.map((p) => p.id);
+
+/** Every pickable model ref across providers, in display order. */
+export const MODEL_IDS = PROVIDERS.flatMap((p) => (p.models ?? []).map((m) => m.id));
+
+/**
+ * The provider a pickable model ref belongs to. Refs carry an OpenClaw
+ * namespace, not a platform provider id (openai/gpt-5.5 is served by the
+ * openai-codex provider), so this goes through the catalog, not the prefix.
+ */
+export function providerForModel(modelId: string): ProviderConfig | undefined {
+  return PROVIDERS.find((p) => p.models?.some((m) => m.id === modelId));
+}
 
 export interface SetApiKeyRequest {
   provider: string;

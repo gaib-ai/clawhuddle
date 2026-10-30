@@ -6,7 +6,8 @@ import { useSession, signOut } from 'next-auth/react';
 import { useOrg } from '@/lib/org-context';
 import { useOrgFetch } from '@/lib/use-org-fetch';
 import { apiFetch } from '@/lib/api';
-import type { OrgMember, Skill } from '@clawhuddle/shared';
+import { GatewayCard } from '@/components/gateway-card';
+import type { Gateway, OrgMember, Skill } from '@clawhuddle/shared';
 
 interface SkillWithStatus extends Skill {
   assigned: boolean;
@@ -148,31 +149,39 @@ function CreateOrgView({ onCreated }: { onCreated: () => Promise<void> }) {
 /* ─── Dashboard ─── */
 
 function DashboardView() {
-  const { orgFetch, ready, userId } = useOrgFetch();
+  const { orgFetch, ready } = useOrgFetch();
   const { memberRole } = useOrg();
   const isAdmin = memberRole === 'admin' || memberRole === 'owner';
 
-  const [me, setMe] = useState<OrgMember | null>(null);
+  const [gateways, setGateways] = useState<Gateway[]>([]);
+  const [limit, setLimit] = useState({ limit: 1, current: 0 });
   const [memberCount, setMemberCount] = useState(0);
   const [runningCount, setRunningCount] = useState(0);
   const [skillStats, setSkillStats] = useState<{ enabled: number; total: number } | null>(null);
   const [loading, setLoading] = useState(true);
-  const [stopping, setStopping] = useState(false);
-  const [deploying, setDeploying] = useState(false);
-  const [deployError, setDeployError] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState('');
+  // Providers this member can actually use (org key or a personal one); the
+  // instance card only offers models from these.
+  const [activeProviders, setActiveProviders] = useState<string[]>([]);
 
   const fetchData = useCallback(async () => {
     if (!orgFetch) return;
     try {
-      const [membersRes, skillsRes] = await Promise.all([
+      const [mineRes, membersRes, skillsRes, keysRes] = await Promise.all([
+        orgFetch<{ data: Gateway[]; limit: number; current: number }>('/me/gateways'),
         orgFetch<{ data: OrgMember[] }>('/members'),
         orgFetch<{ data: SkillWithStatus[] }>('/me/skills'),
+        orgFetch<{ data: { provider: string; source: 'user' | 'org' | 'none' }[] }>('/me/api-keys/summary'),
       ]);
 
-      const self = membersRes.data.find((m: any) => m.user_id === userId);
-      setMe(self || null);
+      setGateways(mineRes.data);
+      setActiveProviders(keysRes.data.filter((k) => k.source !== 'none').map((k) => k.provider));
+      setLimit({ limit: mineRes.limit, current: mineRes.current });
       setMemberCount(membersRes.data.length);
-      setRunningCount(membersRes.data.filter((m: any) => m.gateway_status === 'running').length);
+      setRunningCount(
+        membersRes.data.flatMap((m) => m.gateways ?? []).filter((g) => g.status === 'running').length,
+      );
 
       const enabled = skillsRes.data.filter((s) => s.assigned).length;
       setSkillStats({ enabled, total: skillsRes.data.length });
@@ -181,69 +190,31 @@ function DashboardView() {
     } finally {
       setLoading(false);
     }
-  }, [orgFetch, userId]);
+  }, [orgFetch]);
 
   useEffect(() => {
     fetchData();
   }, [fetchData]);
 
-  // Poll while deploying. /members returns the stored status, which is only
-  // resynced with the container's real health by the status route — so hit
-  // that first, otherwise a gateway that has come up shows "starting..." until
-  // an admin (or the channels page) happens to poll it.
-  useEffect(() => {
-    if (!me || me.gateway_status !== 'deploying') return;
-    const tick = async () => {
-      try {
-        await orgFetch?.('/me/gateway/status');
-      } catch {
-        // ignore — fetchData still refreshes the stored status
-      }
-      await fetchData();
-    };
-    const id = setInterval(tick, 5000);
-    return () => clearInterval(id);
-  }, [me?.gateway_status, fetchData, orgFetch]);
-
-  const openGateway = () => {
-    if (!me?.gateway_token) return;
-    const { protocol, hostname } = window.location;
-    if (hostname === 'localhost' && me.gateway_port) {
-      window.open(`http://localhost:${me.gateway_port}/?token=${me.gateway_token}`, '_blank');
-    } else if (me.gateway_subdomain) {
-      const gwDomain = process.env.NEXT_PUBLIC_GATEWAY_DOMAIN || hostname;
-      window.open(`${protocol}//${me.gateway_subdomain}.${gwDomain}/?token=${me.gateway_token}`, '_blank');
-    }
-  };
-
-  const stopGateway = async () => {
+  const createInstance = async () => {
     if (!orgFetch) return;
-    setStopping(true);
+    setCreating(true);
+    setCreateError('');
     try {
-      await orgFetch('/gateways/me/stop', { method: 'POST' });
-      await fetchData();
-    } catch {
-      // ignore
-    } finally {
-      setStopping(false);
-    }
-  };
-
-  const deployGateway = async () => {
-    if (!orgFetch) return;
-    setDeploying(true);
-    setDeployError('');
-    try {
-      await orgFetch('/gateways/me/deploy', { method: 'POST' });
+      await orgFetch('/me/gateways', { method: 'POST', body: JSON.stringify({}) });
       await fetchData();
     } catch (err: any) {
-      setDeployError(err.message || 'Deploy failed');
+      setCreateError(
+        err.code === 'gateway_limit'
+          ? `Instance limit reached (${err.data?.current}/${err.data?.limit}). Ask an admin to raise it.`
+          : err.message || 'Deploy failed',
+      );
     } finally {
-      setDeploying(false);
+      setCreating(false);
     }
   };
 
-  if (loading || !ready) {
+  if (loading || !ready || !orgFetch) {
     return (
       <div className="flex-1 flex items-center justify-center">
         <div
@@ -254,100 +225,52 @@ function DashboardView() {
     );
   }
 
-  const gwStatus = me?.gateway_status || 'not deployed';
-  const gwColor =
-    gwStatus === 'running' ? 'var(--green)' :
-    gwStatus === 'deploying' ? 'var(--blue)' :
-    gwStatus === 'stopped' ? 'var(--yellow)' :
-    'var(--text-tertiary)';
+  const atLimit = limit.current >= limit.limit;
 
   return (
     <main className="flex-1 overflow-y-auto">
       <div className="max-w-2xl mx-auto px-6 py-8 space-y-4">
-        {/* Gateway Card */}
+        {/* Instances */}
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+            {gateways.length === 1 ? 'AI Assistant' : 'AI Assistants'}
+          </h2>
+          <span className="text-xs tabular-nums" style={{ color: 'var(--text-tertiary)' }}>
+            {limit.current} of {limit.limit} instance{limit.limit === 1 ? '' : 's'}
+          </span>
+        </div>
+
+        {gateways.map((g) => (
+          <GatewayCard key={g.id} gateway={g} orgFetch={orgFetch} onChanged={fetchData} activeProviders={activeProviders} />
+        ))}
+
         <div
           className="rounded-xl p-5"
-          style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)' }}
+          style={{ background: 'var(--bg-primary)', border: '1px dashed var(--border-primary)' }}
         >
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
-              AI Assistant
-            </h2>
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full" style={{ background: gwColor }} />
-              <span className="text-xs font-medium" style={{ color: gwColor }}>
-                {gwStatus === 'deploying' ? 'starting...' : gwStatus}
-              </span>
-            </div>
-          </div>
-
-          {gwStatus === 'running' ? (
-            <div className="flex gap-2">
-              <button
-                onClick={openGateway}
-                className="flex-1 py-2.5 rounded-lg text-sm font-medium transition-colors"
-                style={{ background: 'var(--accent)', color: 'var(--text-inverse)' }}
-                onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--accent-hover)'; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--accent)'; }}
-              >
-                Open AI Assistant
-              </button>
-              <button
-                onClick={stopGateway}
-                disabled={stopping}
-                className="px-4 py-2.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
-                style={{ background: 'var(--bg-secondary)', color: 'var(--text-secondary)', border: '1px solid var(--border-primary)' }}
-                onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--red)'; e.currentTarget.style.color = 'var(--red)'; }}
-                onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border-primary)'; e.currentTarget.style.color = 'var(--text-secondary)'; }}
-              >
-                {stopping ? 'Stopping...' : 'Stop'}
-              </button>
-            </div>
-          ) : gwStatus === 'deploying' ? (
-            <div className="flex items-center justify-between py-2">
-              <div className="flex items-center gap-2">
-                <div
-                  className="w-4 h-4 rounded-full border-2 animate-spin"
-                  style={{ borderColor: 'var(--border-primary)', borderTopColor: 'var(--blue)' }}
-                />
-                <span className="text-xs" style={{ color: 'var(--text-tertiary)' }}>
-                  Your assistant is starting up...
-                </span>
-              </div>
-              <button
-                onClick={stopGateway}
-                disabled={stopping}
-                className="px-3 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50"
-                style={{ background: 'var(--bg-secondary)', color: 'var(--text-secondary)', border: '1px solid var(--border-primary)' }}
-                onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--red)'; e.currentTarget.style.color = 'var(--red)'; }}
-                onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border-primary)'; e.currentTarget.style.color = 'var(--text-secondary)'; }}
-              >
-                {stopping ? 'Stopping...' : 'Stop'}
-              </button>
-            </div>
-          ) : (
-            <div className="py-2 space-y-2">
-              <p className="text-xs" style={{ color: 'var(--text-tertiary)' }}>
-                {gwStatus === 'stopped'
-                  ? 'Your assistant is stopped.'
-                  : 'Your assistant is not yet deployed.'}
-              </p>
-              <button
-                onClick={deployGateway}
-                disabled={deploying}
-                className="w-full py-2.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
-                style={{ background: 'var(--accent)', color: 'var(--text-inverse)' }}
-                onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--accent-hover)'; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--accent)'; }}
-              >
-                {deploying
-                  ? 'Deploying...'
-                  : gwStatus === 'stopped' ? 'Restart My Assistant' : 'Deploy My Assistant'}
-              </button>
-              {deployError && (
-                <p className="text-xs" style={{ color: 'var(--red)' }}>{deployError}</p>
-              )}
-            </div>
+          {gateways.length === 0 && (
+            <p className="text-xs mb-2" style={{ color: 'var(--text-tertiary)' }}>
+              Your assistant is not yet deployed.
+            </p>
+          )}
+          <button
+            onClick={createInstance}
+            disabled={creating || atLimit}
+            title={atLimit ? `Limit of ${limit.limit} reached — ask an admin to raise it` : undefined}
+            className="w-full py-2.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+            style={{ background: 'var(--accent)', color: 'var(--text-inverse)' }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--accent-hover)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--accent)'; }}
+          >
+            {creating ? 'Deploying...' : gateways.length === 0 ? 'Deploy My Assistant' : '+ New instance'}
+          </button>
+          {atLimit && gateways.length > 0 && (
+            <p className="text-xs mt-2" style={{ color: 'var(--text-tertiary)' }}>
+              Limit of {limit.limit} reached — ask an admin to raise it.
+            </p>
+          )}
+          {createError && (
+            <p className="text-xs mt-2" style={{ color: 'var(--red)' }}>{createError}</p>
           )}
         </div>
 
@@ -367,6 +290,7 @@ function DashboardView() {
                 </h2>
                 <p className="text-xs mt-1" style={{ color: 'var(--text-tertiary)' }}>
                   {skillStats.enabled} of {skillStats.total} enabled
+                  {gateways.length > 1 ? ' · shared by every instance' : ''}
                 </p>
               </div>
               <span className="text-xs font-medium" style={{ color: 'var(--accent)' }}>

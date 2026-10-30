@@ -53,7 +53,7 @@ export default function MyApiKeysPage() {
         method: 'PUT',
         body: JSON.stringify({ primary_provider: value === '' ? null : value }),
       });
-      toast('Primary provider updated. Restart your gateway for the change to take effect.', 'success');
+      toast('Primary provider updated. Restart your instances for the change to take effect.', 'success');
     } catch (err: any) {
       setMyPrimary(previous);
       toast(err.message || 'Failed to update primary provider', 'error');
@@ -79,7 +79,7 @@ export default function MyApiKeysPage() {
         My API Keys
       </h1>
       <p className="text-sm mb-6" style={{ color: 'var(--text-tertiary)' }}>
-        Personal keys override the organization defaults for your gateway only. Changes apply via hot-reload — no redeploy needed.
+        Personal keys override the organization defaults for your own instances only. Changes apply via hot-reload — no redeploy needed.
       </p>
 
       <div
@@ -95,8 +95,8 @@ export default function MyApiKeysPage() {
           </span>
         </div>
         <p className="text-xs mb-3" style={{ color: 'var(--text-tertiary)' }}>
-          Choose which provider your gateway uses as its primary model. Leave it on the org default
-          to follow whatever your admin sets. Takes effect the next time your gateway restarts
+          Choose which provider your instances use as their primary model. Leave it on the org default
+          to follow whatever your admin sets; an instance can pin its own on Home. Takes effect the next time an instance restarts
           (use Deploy/Restart on the Home page).
         </p>
         <select

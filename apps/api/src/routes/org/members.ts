@@ -4,18 +4,26 @@ import { v4 as uuid } from 'uuid';
 import crypto from 'node:crypto';
 import { requireRole } from '../../middleware/auth.js';
 import { sendInvitationEmail } from '../../services/email.js';
-import { getOrgContainerIds, syncAuthProfilesForUser } from '../../services/gateway.js';
+import { getOrgContainerIds, removeGateway, syncAuthProfilesForUser } from '../../services/gateway.js';
+import { containerNameFor, effectiveGatewayLimit, listMemberGateways, listOrgGateways, summarizeGateway } from '../../services/gateway-store.js';
 import type { InviteMemberRequest, UpdateMemberRequest } from '@clawhuddle/shared';
 import { DEFAULT_MAX_MEMBERS, PROVIDER_IDS } from '@clawhuddle/shared';
 
-// gateway_token is a bearer credential for that member's gateway, so member
-// responses only carry the caller's own. Admins fetch another member's one at a
-// time from GET .../gateways/members/:memberId/access.
+// gateway_token is a bearer credential for that member's slot-1 gateway, so
+// member responses only carry the caller's own. Admins fetch another member's
+// one at a time from GET .../gateways/:gatewayId/access.
 function withoutOthersGatewayToken<T extends { user_id: string; gateway_token?: string | null }>(
   member: T,
   viewerUserId: string,
 ): T {
   return member.user_id === viewerUserId ? member : { ...member, gateway_token: null };
+}
+
+/** null clears the override; otherwise an integer >= 1. Returns an error message or null. */
+export function maxGatewaysProblem(value: unknown): string | null {
+  if (value === null) return null;
+  if (!Number.isInteger(value) || (value as number) < 1) return 'max_gateways must be an integer >= 1 or null';
+  return null;
 }
 
 export const ROLES = ['owner', 'admin', 'member'];
@@ -33,11 +41,21 @@ export async function orgMemberRoutes(app: FastifyInstance) {
        ORDER BY om.joined_at`
     ).all(request.orgId!) as any[];
 
-    // Enrich with Docker container IDs
+    // Attach each member's instances (tokens stripped) with their Docker
+    // container IDs, plus the limit that applies to them. container_id on the
+    // member itself is the slot-1 instance's, as before instances existed.
     const containerIds = await getOrgContainerIds(request.orgId!);
+    const byMember = new Map<string, any[]>();
+    for (const g of listOrgGateways(request.orgId!)) {
+      const list = byMember.get(g.member_id) ?? [];
+      list.push({ ...summarizeGateway(g), container_id: containerIds.get(containerNameFor(g)) ?? null });
+      byMember.set(g.member_id, list);
+    }
     for (const m of members) {
-      const userPrefix = m.user_id?.slice(0, 8);
-      m.container_id = userPrefix ? (containerIds.get(userPrefix) || null) : null;
+      m.gateways = byMember.get(m.id) ?? [];
+      m.gateway_count = m.gateways.length;
+      m.effective_max_gateways = effectiveGatewayLimit(request.orgId!, m.id).limit;
+      m.container_id = m.gateways.find((g: any) => g.slot === 1)?.container_id ?? null;
     }
 
     return { data: members.map((m) => withoutOthersGatewayToken(m, request.currentUser!.id)) };
@@ -175,6 +193,7 @@ export async function orgMemberRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const { memberId } = request.params;
       const { role, status } = request.body;
+      const hasMaxGateways = 'max_gateways' in request.body;
 
       const db = getDb();
       const member = db.prepare(
@@ -183,6 +202,10 @@ export async function orgMemberRoutes(app: FastifyInstance) {
 
       if (!member) {
         return reply.status(404).send({ error: 'not_found', message: 'Member not found' });
+      }
+      if (hasMaxGateways) {
+        const problem = maxGatewaysProblem(request.body.max_gateways);
+        if (problem) return reply.status(400).send({ error: 'validation', message: problem });
       }
 
       // Only owners can change roles to/from owner
@@ -206,6 +229,10 @@ export async function orgMemberRoutes(app: FastifyInstance) {
       if (status !== undefined) {
         updates.push('status = ?');
         values.push(status);
+      }
+      if (hasMaxGateways) {
+        updates.push('max_gateways = ?');
+        values.push(request.body.max_gateways ?? null);
       }
 
       if (updates.length > 0) {
@@ -244,6 +271,16 @@ export async function orgMemberRoutes(app: FastifyInstance) {
         return reply.status(400).send({ error: 'validation', message: 'Cannot remove org owner' });
       }
 
+      // Containers, workspaces and port-forward files first: the row's cascade
+      // only takes the DB rows with it.
+      for (const g of listMemberGateways(memberId)) {
+        try {
+          await removeGateway(request.orgId!, g.id);
+        } catch (err: any) {
+          request.log.error({ gatewayId: g.id, err: err.message }, 'failed to remove gateway while removing member');
+        }
+      }
+
       db.prepare('DELETE FROM org_members WHERE id = ?').run(memberId);
       return { data: { id: memberId, removed: true } };
     }
@@ -279,8 +316,8 @@ export async function orgMemberRoutes(app: FastifyInstance) {
         .run(next, request.orgMember!.id);
 
       // Primary provider is baked into agents.defaults in openclaw.json at
-      // config-generation time — rewrite this member's config; the change takes
-      // effect on the next gateway restart.
+      // config-generation time — rewrite every instance this member owns that
+      // does not pin its own; the change takes effect on the next restart.
       syncAuthProfilesForUser(request.orgId!, (request.orgMember as any).user_id);
 
       return { data: { primary_provider: next } };

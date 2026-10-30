@@ -2,17 +2,20 @@ import { FastifyInstance } from 'fastify';
 import { getDb } from '../db/index.js';
 import { v4 as uuid } from 'uuid';
 import { authPlugin } from '../middleware/auth.js';
-import { deleteOrgGateways } from '../services/gateway.js';
-import { PROVIDER_IDS, type CreateOrgRequest, type UpdateOrgRequest } from '@clawhuddle/shared';
-import { syncAuthProfiles } from '../services/gateway.js';
+import { deleteOrgGateways, syncAuthProfiles } from '../services/gateway.js';
+import { PROVIDER_IDS, MODEL_IDS, providerForModel, type CreateOrgRequest, type UpdateOrgRequest } from '@clawhuddle/shared';
+import { maxGatewaysProblem } from './org/members.js';
 
+// Call deleteOrgGateways() first: it removes containers, workspaces and the
+// port-forward files, which the cascades below cannot.
 export function purgeOrgFromDb(db: any, orgId: string) {
   db.prepare('DELETE FROM invitations WHERE org_id = ?').run(orgId);
   db.prepare('DELETE FROM user_skills WHERE skill_id IN (SELECT id FROM skills WHERE org_id = ?)').run(orgId);
   db.prepare('DELETE FROM skills WHERE org_id = ?').run(orgId);
   db.prepare('DELETE FROM api_keys WHERE org_id = ?').run(orgId);
   db.prepare('UPDATE usage_logs SET org_id = NULL WHERE org_id = ?').run(orgId);
-  db.prepare('DELETE FROM org_members WHERE org_id = ?').run(orgId); // cascades member_channels
+  db.prepare('DELETE FROM port_forwards WHERE org_id = ?').run(orgId);
+  db.prepare('DELETE FROM org_members WHERE org_id = ?').run(orgId); // cascades gateways, gateway_channels, member_channels
   db.prepare('DELETE FROM organizations WHERE id = ?').run(orgId);
 }
 
@@ -69,7 +72,7 @@ export async function orgRoutes(app: FastifyInstance) {
     return reply.status(201).send({ data: org });
   });
 
-  // Update organization settings (admin/owner only). Currently just primary_provider.
+  // Update organization settings (admin/owner only): primary_provider, max_gateways_per_user.
   app.patch<{ Params: { orgId: string }; Body: UpdateOrgRequest }>(
     '/api/orgs/:orgId',
     async (request, reply) => {
@@ -95,6 +98,37 @@ export async function orgRoutes(app: FastifyInstance) {
         }
         updates.push('primary_provider = ?');
         params.push(next ?? null);
+        // The model pin belongs to the provider it was chosen under; a new
+        // provider starts from its default unless the same request pins a model.
+        if (!('primary_model' in request.body)) {
+          updates.push('primary_model = NULL');
+        }
+      }
+
+      if ('primary_model' in request.body) {
+        const model = request.body.primary_model ?? null;
+        if (model !== null) {
+          if (!MODEL_IDS.includes(model)) {
+            return reply.status(400).send({ error: 'validation', message: `Unknown model: ${model}` });
+          }
+          const provider = 'primary_provider' in request.body
+            ? request.body.primary_provider
+            : (db.prepare('SELECT primary_provider FROM organizations WHERE id = ?').get(orgId) as { primary_provider: string | null } | undefined)?.primary_provider;
+          if (providerForModel(model)?.id !== provider) {
+            return reply.status(400).send({ error: 'validation', message: `${model} is not a model of the pinned primary provider` });
+          }
+        }
+        updates.push('primary_model = ?');
+        params.push(model);
+      }
+
+      if ('max_gateways_per_user' in request.body) {
+        const problem = maxGatewaysProblem(request.body.max_gateways_per_user ?? null);
+        if (problem) {
+          return reply.status(400).send({ error: 'validation', message: problem.replace('max_gateways', 'max_gateways_per_user') });
+        }
+        updates.push('max_gateways_per_user = ?');
+        params.push(request.body.max_gateways_per_user ?? null);
       }
 
       if (updates.length === 0) {
@@ -107,7 +141,7 @@ export async function orgRoutes(app: FastifyInstance) {
       // Primary provider is baked into agents.defaults at config-generation time,
       // not read at runtime from a file — so changing it requires rewriting every
       // member's openclaw.json. auth-profiles.json hot-reload won't pick it up.
-      syncAuthProfiles(orgId);
+      if ('primary_provider' in request.body || 'primary_model' in request.body) syncAuthProfiles(orgId);
 
       const org = db.prepare('SELECT * FROM organizations WHERE id = ?').get(orgId);
       return { data: org };

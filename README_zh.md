@@ -153,6 +153,7 @@ docker compose up -d
 | `ANTHROPIC_API_KEY`         | 預設 Anthropic API 金鑰                                                               | —                       |
 | `SUPER_ADMIN_EMAIL`         | 超級管理員 email                                                                      | —                       |
 | `MAX_MEMBERS_PER_ORG`       | 每個組織的成員上限                                                                    | `50`                    |
+| `MAX_GATEWAYS_PER_USER`     | 每位成員可執行的 Gateway 實例數上限；組織管理員可依組織或成員調高                     | `1`                     |
 | `RESEND_API_KEY`            | Resend API 金鑰（邀請信用）                                                           | —                       |
 | `EMAIL_FROM`                | 寄件者地址                                                                            | —                       |
 | `APP_URL`                   | 公開應用程式 URL，用於邀請信中的連結                                                  | `http://localhost:3000` |

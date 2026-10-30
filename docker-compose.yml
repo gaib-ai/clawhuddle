@@ -74,6 +74,8 @@ services:
       - EMAIL_FROM=${EMAIL_FROM:-}
       - APP_URL=${APP_URL:-http://localhost:3000}
       - SUPER_ADMIN_EMAIL=${SUPER_ADMIN_EMAIL:-}
+      - MAX_MEMBERS_PER_ORG=${MAX_MEMBERS_PER_ORG:-}
+      - MAX_GATEWAYS_PER_USER=${MAX_GATEWAYS_PER_USER:-}
       - GATEWAY_NETWORK=clawhuddle-gateways
       - DOMAIN=${DOMAIN:-localhost}
       - GATEWAY_DOMAIN=${GATEWAY_DOMAIN:-}

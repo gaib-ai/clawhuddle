@@ -5,23 +5,50 @@ import fs from "node:fs";
 import path from "node:path";
 import { getDb } from "../db/index.js";
 import { getResolvedApiKeysForMember } from "../routes/org/api-keys.js";
-import { generateOpenClawConfig, mergeOpenClawConfig, type ChannelTokens } from "./openclaw-config.js";
+import { generateOpenClawConfig, mergeOpenClawConfig } from "./openclaw-config.js";
 import { installSkillsForUser } from "./skill-installer.js";
-import type { Skill, OrgMember } from "@clawhuddle/shared";
+import { removePortForwardsForGateway, removePortForwardsForOrg } from "./port-forward.js";
+import {
+  CONTAINER_PREFIX,
+  GATEWAY_INTERNAL_PORT,
+  containerNameFor,
+  createGatewayRow,
+  deleteGatewayRow,
+  gatewayDirName,
+  getDataDir,
+  getGatewayChannelTokens,
+  getGatewayDir,
+  getGatewayRow,
+  getHostGatewayDir,
+  getPrimaryPin,
+  listMemberGateways,
+  listOrgGateways,
+  listUserGateways,
+  markSlackAccessMigrated,
+  setGatewayState,
+  slackAccessMigrated,
+  summarizeGateway,
+  type GatewayRef,
+  type GatewayRow,
+} from "./gateway-store.js";
+import type { DevicePairingRequest, DeviceRequestList, Skill } from "@clawhuddle/shared";
 import { PROVIDERS } from "@clawhuddle/shared";
+
+export { getContainerName, GatewayLimitError } from "./gateway-store.js";
 
 const docker = new Docker();
 
 const GATEWAY_IMAGE = "clawhuddle-gateway:local";
 // OpenClaw listens on loopback:6100; socat bridges external traffic on 0.0.0.0:6101
-const GATEWAY_INTERNAL_PORT = 6100;
 const GATEWAY_EXTERNAL_PORT = 6101;
-const CONTAINER_PREFIX = "clawhuddle-gw-";
 // Gateways run agent-controlled code, so they get a network of their own shared
 // only with what they must reach (Traefik, claw-proxy) — never the API or web.
 const GATEWAY_NETWORK = process.env.GATEWAY_NETWORK || "clawhuddle-gateways";
 const DOMAIN = process.env.DOMAIN || "localhost";
 const GATEWAY_DOMAIN = process.env.GATEWAY_DOMAIN || DOMAIN;
+
+/** How an instance is referred to in log lines: <orgId>/<userId>[-<slot>]. */
+const refLabel = (ref: GatewayRef) => `${ref.org_id}/${gatewayDirName(ref.user_id, ref.slot)}`;
 
 async function ensureNetwork(): Promise<void> {
   try {
@@ -54,76 +81,12 @@ async function checkGatewayHealth(containerName: string): Promise<boolean> {
           resolve(false);
         }
       });
+      stream.on("error", () => resolve(false));
       setTimeout(() => resolve(false), 5000);
     });
   } catch {
     return false;
   }
-}
-
-function getDataDir(): string {
-  return process.env.DATA_DIR || path.resolve("./data");
-}
-
-// Host path for Docker bind mounts — must be an absolute path on the HOST machine.
-// In Docker Compose this is set to ${PWD}/data automatically.
-// For local dev (no container), falls back to getDataDir() which is already on the host.
-function getHostDataDir(): string {
-  const dir = process.env.HOST_DATA_DIR || getDataDir();
-  if (!path.isAbsolute(dir)) {
-    throw new Error(
-      `HOST_DATA_DIR must be an absolute path (got "${dir}"). Set it in .env or docker-compose.yml.`,
-    );
-  }
-  return dir;
-}
-
-function getGatewayDir(orgId: string, userId: string): string {
-  return path.join(getDataDir(), "gateways", orgId, userId);
-}
-
-function getHostGatewayDir(orgId: string, userId: string): string {
-  return path.join(getHostDataDir(), "gateways", orgId, userId);
-}
-
-export function getContainerName(orgId: string, userId: string): string {
-  // Keep under 63 chars for Docker DNS resolution
-  return `${CONTAINER_PREFIX}${orgId.slice(0, 8)}-${userId.slice(0, 8)}`;
-}
-
-// Gateway subdomain: "claw-{hex}" under parent domain
-function generateSubdomain(): string {
-  return `claw-${crypto.randomBytes(4).toString("hex")}`;
-}
-
-function getMember(
-  orgId: string,
-  memberId: string,
-): OrgMember & { user_id: string } {
-  const db = getDb();
-  const member = db
-    .prepare("SELECT * FROM org_members WHERE id = ? AND org_id = ?")
-    .get(memberId, orgId) as (OrgMember & { user_id: string }) | undefined;
-  if (!member) throw new Error("Member not found");
-  return member;
-}
-
-// The legacy-open Slack lockdown in mergeOpenClawConfig runs once per gateway:
-// after its first merge the Slack block is the member's, even if they later set
-// it back to exactly the old platform default.
-function slackAccessMigrated(memberId: string): boolean {
-  const row = getDb()
-    .prepare("SELECT slack_access_migrated_at FROM org_members WHERE id = ?")
-    .get(memberId) as { slack_access_migrated_at: string | null } | undefined;
-  return !!row?.slack_access_migrated_at;
-}
-
-function markSlackAccessMigrated(memberId: string): void {
-  getDb()
-    .prepare(
-      "UPDATE org_members SET slack_access_migrated_at = COALESCE(slack_access_migrated_at, datetime('now')) WHERE id = ?",
-    )
-    .run(memberId);
 }
 
 function getMemberSkills(orgId: string, userId: string): Skill[] {
@@ -137,21 +100,6 @@ function getMemberSkills(orgId: string, userId: string): Skill[] {
        SELECT * FROM skills WHERE type = 'mandatory' AND enabled = 1 AND org_id = ?`,
     )
     .all(userId, orgId, orgId) as Skill[];
-}
-
-function getMemberChannelTokens(memberId: string): ChannelTokens {
-  const db = getDb();
-  const rows = db
-    .prepare("SELECT channel, bot_token, app_token FROM member_channels WHERE member_id = ?")
-    .all(memberId) as { channel: string; bot_token: string; app_token: string | null }[];
-  const tokens: ChannelTokens = {};
-  for (const row of rows) {
-    if (row.channel === "telegram") tokens.telegram = row.bot_token;
-    else if (row.channel === "discord") tokens.discord = row.bot_token;
-    else if (row.channel === "slack")
-      tokens.slack = { botToken: row.bot_token, appToken: row.app_token ?? undefined };
-  }
-  return tokens;
 }
 
 function createTraefikLabels(
@@ -198,11 +146,14 @@ function createTraefikLabels(
  * means the fields are there, not that the credential still works. So writing
  * this file cannot by itself change a credential; see reconcileAuthProfileStore.
  *
+ * Credentials are resolved per user, so every instance a member owns gets the
+ * same keys (personal overrides where set, org defaults elsewhere).
+ *
  * Also returns a fingerprint per profile id, taken from the credential in our
  * own database, which reconcile needs to tell an operator replacing a key apart
  * from OpenClaw refreshing one.
  */
-function writeAuthProfiles(orgId: string, userId: string, persist = true): {
+function writeAuthProfiles(ref: GatewayRef, persist = true): {
   providerIds: string[];
   modelOverrides: Record<string, string>;
   clawProxyKey: string | null;
@@ -210,8 +161,7 @@ function writeAuthProfiles(orgId: string, userId: string, persist = true): {
   profiles: Record<string, Record<string, unknown>>;
   fingerprints: Record<string, string>;
 } {
-  // Resolved = personal overrides where set, org defaults elsewhere
-  const allKeys = getResolvedApiKeysForMember(orgId, userId);
+  const allKeys = getResolvedApiKeysForMember(ref.org_id, ref.user_id);
   const profiles: Record<string, Record<string, unknown>> = {};
   const fingerprints: Record<string, string> = {};
   const providerIds: string[] = [];
@@ -306,7 +256,7 @@ function writeAuthProfiles(orgId: string, userId: string, persist = true): {
   }
 
   const authProfilesPath = path.join(
-    getGatewayDir(orgId, userId),
+    getGatewayDir(ref),
     "agents", "main", "agent", "auth-profiles.json",
   );
   if (persist) {
@@ -334,9 +284,9 @@ function getTokenKioskBaseUrl(): string {
 const MANAGED_PROFILE_ID = /^[^:]+:(manual|oauth|setup-token)(-\d+)?$/;
 
 /** Our record of which credential each profile id was last handed to the importer. */
-function authFingerprintPath(orgId: string, userId: string): string {
+function authFingerprintPath(ref: GatewayRef): string {
   return path.join(
-    getGatewayDir(orgId, userId),
+    getGatewayDir(ref),
     "agents", "main", "agent", ".clawhuddle-auth-fingerprints.json",
   );
 }
@@ -365,22 +315,21 @@ function authFingerprintPath(orgId: string, userId: string): string {
  * open, and a running agent would not observe the change anyway.
  */
 export function reconcileAuthProfileStore(
-  orgId: string,
-  userId: string,
+  ref: GatewayRef,
   profiles: Record<string, Record<string, unknown>>,
   fingerprints: Record<string, string>,
 ): void {
   const storePath = path.join(
-    getGatewayDir(orgId, userId),
+    getGatewayDir(ref),
     "agents", "main", "agent", "openclaw-agent.sqlite",
   );
   const recordFingerprints = () => {
     try {
-      const target = authFingerprintPath(orgId, userId);
+      const target = authFingerprintPath(ref);
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.writeFileSync(target, JSON.stringify(fingerprints, null, 2));
     } catch (err) {
-      console.warn(`[gateway] could not record auth fingerprints for ${orgId}/${userId}:`, err);
+      console.warn(`[gateway] could not record auth fingerprints for ${refLabel(ref)}:`, err);
     }
   };
 
@@ -389,7 +338,7 @@ export function reconcileAuthProfileStore(
 
   let previous: Record<string, string> = {};
   try {
-    previous = JSON.parse(fs.readFileSync(authFingerprintPath(orgId, userId), "utf-8"));
+    previous = JSON.parse(fs.readFileSync(authFingerprintPath(ref), "utf-8"));
   } catch { /* first run, or unreadable — treated as "no record" below */ }
 
   let store: Database.Database | undefined;
@@ -421,134 +370,15 @@ export function reconcileAuthProfileStore(
       .prepare("UPDATE auth_profile_store SET store_json = ? WHERE store_key = 'primary'")
       .run(JSON.stringify(parsed));
     console.log(
-      `[gateway] auth store reconciled for ${orgId}/${userId}: dropped ${dropped.join(", ")} for re-import`,
+      `[gateway] auth store reconciled for ${refLabel(ref)}: dropped ${dropped.join(", ")} for re-import`,
     );
   } catch (err) {
     // A malformed or unfamiliar store must not block a redeploy: the gateway
     // still boots, it just keeps serving the previous credential.
-    console.warn(`[gateway] could not reconcile auth store for ${orgId}/${userId}:`, err);
+    console.warn(`[gateway] could not reconcile auth store for ${refLabel(ref)}:`, err);
   } finally {
     store?.close();
   }
-}
-
-// Member's personal primary provider wins; falls back to the org default.
-function getPrimaryProvider(orgId: string, userId: string): string | null {
-  const db = getDb();
-  const memberRow = db
-    .prepare('SELECT primary_provider FROM org_members WHERE org_id = ? AND user_id = ?')
-    .get(orgId, userId) as { primary_provider: string | null } | undefined;
-  if (memberRow?.primary_provider) return memberRow.primary_provider;
-  const orgRow = db
-    .prepare('SELECT primary_provider FROM organizations WHERE id = ?')
-    .get(orgId) as { primary_provider: string | null } | undefined;
-  return orgRow?.primary_provider ?? null;
-}
-
-/**
- * Rewrite both files for a single gateway in-place:
- *  - auth-profiles.json (credentials; hot-reloaded by OpenClaw)
- *  - openclaw.json (provider list + agents.defaults; OpenClaw reads at startup,
- *    so primary provider / new provider lists only take effect on the next start)
- *
- * Returns false if the gateway directory doesn't exist (member hasn't been
- * provisioned yet) — caller may treat this as a no-op.
- */
-function regenerateGatewayConfig(orgId: string, userId: string): boolean {
-  const gatewayDir = getGatewayDir(orgId, userId);
-  if (!fs.existsSync(gatewayDir)) return false;
-
-  const db = getDb();
-  const member = db
-    .prepare(
-      `SELECT id, gateway_token, gateway_subdomain, gateway_port, gateway_status FROM org_members
-       WHERE org_id = ? AND user_id = ?`,
-    )
-    .get(orgId, userId) as {
-    id: string;
-    gateway_token: string | null;
-    gateway_subdomain: string | null;
-    gateway_port: number | null;
-    gateway_status: string | null;
-  } | undefined;
-
-  // OpenClaw 2026.10.x keeps credentials in SQLite and treats auth-profiles.json
-  // as a legacy source that only Doctor (at boot) may import. Dropping a fresh
-  // copy next to a RUNNING gateway makes it refuse every provider named in the
-  // file ("requires legacy credential migration") until the next restart — that
-  // is how an org-key edit on 2026-10-16 took every gateway offline. So while
-  // the container is up, credentials are applied on the next start/redeploy
-  // (both rewrite the file); only openclaw.json (model config, kiosk/proxy
-  // keys) is refreshed now, which the gateway hot-reloads.
-  const live = member?.gateway_status === "running" || member?.gateway_status === "deploying";
-  const { providerIds, modelOverrides, clawProxyKey, tokenKioskKey } = writeAuthProfiles(orgId, userId, !live);
-  if (live) {
-    console.log(`[gateway] auth-profiles for ${orgId}/${userId} deferred to next restart (gateway is ${member?.gateway_status})`);
-  }
-
-  if (!member?.gateway_token || !member.gateway_subdomain) {
-    // No provisioned gateway yet — auth-profiles.json is enough; openclaw.json
-    // will be generated fresh when the gateway is first provisioned.
-    return false;
-  }
-
-  const channelTokens = getMemberChannelTokens(member.id);
-
-  const clawProxyBaseUrl = process.env.CLAW_PROXY_URL || 'http://claw-proxy:3456/v1';
-  const configOptions = {
-    port: GATEWAY_INTERNAL_PORT,
-    token: member.gateway_token,
-    activeProviderIds: providerIds,
-    modelOverrides,
-    channelTokens,
-    clawProxy: clawProxyKey ? { baseUrl: clawProxyBaseUrl, apiKey: clawProxyKey } : undefined,
-    tokenKiosk: tokenKioskKey ? { baseUrl: getTokenKioskBaseUrl(), apiKey: tokenKioskKey } : undefined,
-    primaryProviderId: getPrimaryProvider(orgId, userId) ?? undefined,
-    ...getControlUiOrigins(member.gateway_subdomain),
-  };
-
-  const configPath = path.join(gatewayDir, 'openclaw.json');
-  const lockDownLegacySlack = !slackAccessMigrated(member.id);
-  let config;
-  try {
-    const existing = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    config = mergeOpenClawConfig(existing, configOptions, { lockDownLegacySlack });
-  } catch {
-    config = generateOpenClawConfig(configOptions);
-  }
-  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-  markSlackAccessMigrated(member.id);
-  return true;
-}
-
-/**
- * Sync every gateway in the org. Called after an org-level change (org-default
- * key add/delete, primary_provider update) that may affect every member.
- *
- * Note: openclaw.json hot-reloads (model config, custom-provider keys), but
- * auth-profiles.json is only imported by Doctor at boot and must not be
- * rewritten under a running gateway (see regenerateGatewayConfig). Standard
- * provider key changes therefore take effect on each gateway's next restart.
- */
-export function syncAuthProfiles(orgId: string): void {
-  const db = getDb();
-  const members = db
-    .prepare(
-      `SELECT user_id FROM org_members
-       WHERE org_id = ? AND gateway_port IS NOT NULL`,
-    )
-    .all(orgId) as { user_id: string }[];
-
-  for (const { user_id } of members) {
-    regenerateGatewayConfig(orgId, user_id);
-  }
-}
-
-/**
- * Sync a single member's gateway. Called after a personal key change.
- */
-export function syncAuthProfilesForUser(orgId: string, userId: string): void {
-  regenerateGatewayConfig(orgId, userId);
 }
 
 const IS_LOCAL_DEV = DOMAIN === "localhost";
@@ -564,14 +394,106 @@ function getControlUiOrigins(subdomain: string): { allowedOrigins?: string[]; us
   return { allowedOrigins: [`http://${host}`, `https://${host}`] };
 }
 
-function createContainerConfig(
-  containerName: string,
-  subdomain: string,
-  orgId: string,
-  userId: string,
+function configOptionsFor(
+  g: GatewayRow,
+  auth: { providerIds: string[]; modelOverrides: Record<string, string>; clawProxyKey: string | null; tokenKioskKey: string | null },
 ) {
+  const clawProxyBaseUrl = process.env.CLAW_PROXY_URL || 'http://claw-proxy:3456/v1';
+  const pin = getPrimaryPin(g);
+  return {
+    port: GATEWAY_INTERNAL_PORT,
+    token: g.token,
+    activeProviderIds: auth.providerIds,
+    modelOverrides: auth.modelOverrides,
+    channelTokens: getGatewayChannelTokens(g.id),
+    clawProxy: auth.clawProxyKey ? { baseUrl: clawProxyBaseUrl, apiKey: auth.clawProxyKey } : undefined,
+    tokenKiosk: auth.tokenKioskKey ? { baseUrl: getTokenKioskBaseUrl(), apiKey: auth.tokenKioskKey } : undefined,
+    primaryProviderId: pin.provider ?? undefined,
+    primaryModel: pin.model ?? undefined,
+    ...getControlUiOrigins(g.subdomain),
+  };
+}
+
+// Merge into the existing openclaw.json to preserve user customizations; a
+// fresh instance (or a lost file) gets a generated one.
+function writeOpenClawConfig(g: GatewayRow, options: ReturnType<typeof configOptionsFor>): void {
+  const configPath = path.join(getGatewayDir(g), "openclaw.json");
+  const lockDownLegacySlack = !slackAccessMigrated(g.id);
+  let config;
+  try {
+    const existing = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    config = mergeOpenClawConfig(existing, options, { lockDownLegacySlack });
+  } catch {
+    config = generateOpenClawConfig(options);
+  }
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+  markSlackAccessMigrated(g.id);
+}
+
+/**
+ * Rewrite both files for one instance in place:
+ *  - auth-profiles.json (credentials; imported by Doctor at the next boot)
+ *  - openclaw.json (provider list + agents.defaults; hot-reloaded)
+ *
+ * Returns false if the instance has no directory yet — caller may treat this
+ * as a no-op.
+ */
+function regenerateGatewayConfig(g: GatewayRow): boolean {
+  if (!fs.existsSync(getGatewayDir(g))) return false;
+
+  // OpenClaw 2026.10.x keeps credentials in SQLite and treats auth-profiles.json
+  // as a legacy source that only Doctor (at boot) may import. Dropping a fresh
+  // copy next to a RUNNING gateway makes it refuse every provider named in the
+  // file ("requires legacy credential migration") until the next restart — that
+  // is how an org-key edit on 2026-10-16 took every gateway offline. So while
+  // the container is up, credentials are applied on the next start/redeploy
+  // (both rewrite the file); only openclaw.json (model config, kiosk/proxy
+  // keys) is refreshed now, which the gateway hot-reloads.
+  const live = g.status === "running" || g.status === "deploying";
+  const auth = writeAuthProfiles(g, !live);
+  if (live) {
+    console.log(`[gateway] auth-profiles for ${refLabel(g)} deferred to next restart (gateway is ${g.status})`);
+  }
+
+  writeOpenClawConfig(g, configOptionsFor(g, auth));
+  return true;
+}
+
+/**
+ * Sync every gateway in the org. Called after an org-level change (org-default
+ * key add/delete, primary_provider update) that may affect every member.
+ *
+ * Note: openclaw.json hot-reloads (model config, custom-provider keys), but
+ * auth-profiles.json is only imported by Doctor at boot and must not be
+ * rewritten under a running gateway (see regenerateGatewayConfig). Standard
+ * provider key changes therefore take effect on each gateway's next restart.
+ */
+export function syncAuthProfiles(orgId: string): void {
+  for (const g of listOrgGateways(orgId)) {
+    regenerateGatewayConfig(g);
+  }
+}
+
+/**
+ * Sync every instance one member owns. Called after a personal key or
+ * primary-provider change.
+ */
+export function syncAuthProfilesForUser(orgId: string, userId: string): void {
+  for (const g of listUserGateways(orgId, userId)) {
+    regenerateGatewayConfig(g);
+  }
+}
+
+/** Rewrite one instance's config (e.g. after its own primary-provider pin changed). */
+export function syncGatewayConfig(orgId: string, gatewayId: string): void {
+  regenerateGatewayConfig(getGatewayRow(orgId, gatewayId));
+}
+
+function createContainerConfig(g: GatewayRow) {
+  const containerName = containerNameFor(g);
   const hostConfig: Record<string, any> = {
-    Binds: [`${getHostGatewayDir(orgId, userId)}:/root/.openclaw`],
+    Binds: [`${getHostGatewayDir(g)}:/root/.openclaw`],
     RestartPolicy: { Name: "unless-stopped" },
   };
 
@@ -586,7 +508,7 @@ function createContainerConfig(
     Image: GATEWAY_IMAGE,
     name: containerName,
     Env: [],
-    Labels: createTraefikLabels(containerName, subdomain),
+    Labels: createTraefikLabels(containerName, g.subdomain),
     ExposedPorts: { [`${GATEWAY_EXTERNAL_PORT}/tcp`]: {} },
     HostConfig: hostConfig,
     NetworkingConfig: {
@@ -613,393 +535,207 @@ async function getHostPort(containerName: string): Promise<number | null> {
   }
 }
 
-export async function provisionGateway(orgId: string, memberId: string) {
-  await ensureNetwork();
-  const db = getDb();
-  const member = getMember(orgId, memberId);
-  if (
-    member.gateway_status === "running" ||
-    member.gateway_status === "deploying"
-  ) {
-    throw new Error("Gateway already running");
-  }
-
-  // Use fixed internal port, generate token and subdomain
-  const port = GATEWAY_INTERNAL_PORT;
-  const token = crypto.randomBytes(24).toString("hex");
-  const subdomain = generateSubdomain();
-
-  // Create workspace directory
-  const gatewayDir = getGatewayDir(orgId, member.user_id);
-  fs.mkdirSync(gatewayDir, { recursive: true });
-
-  // Write auth-profiles.json (credentials read from file, not env vars)
-  const { providerIds, modelOverrides, clawProxyKey, tokenKioskKey, profiles, fingerprints } = writeAuthProfiles(orgId, member.user_id);
-  reconcileAuthProfileStore(orgId, member.user_id, profiles, fingerprints);
-  if (providerIds.length === 0)
-    throw new Error("No API keys configured — add at least one provider key");
-
-  // Get member's skills
-  const skills = getMemberSkills(orgId, member.user_id);
-
-  // Read channel tokens (e.g. Telegram bot token)
-  const channelTokens = getMemberChannelTokens(memberId);
-
-  // Generate config
-  const clawProxyBaseUrl = process.env.CLAW_PROXY_URL || 'http://claw-proxy:3456/v1';
-  const config = generateOpenClawConfig({
-    port,
-    token,
-    activeProviderIds: providerIds,
-    modelOverrides,
-    channelTokens,
-    clawProxy: clawProxyKey ? { baseUrl: clawProxyBaseUrl, apiKey: clawProxyKey } : undefined,
-    tokenKiosk: tokenKioskKey ? { baseUrl: getTokenKioskBaseUrl(), apiKey: tokenKioskKey } : undefined,
-    primaryProviderId: getPrimaryProvider(orgId, member.user_id) ?? undefined,
-    ...getControlUiOrigins(subdomain),
-  });
-  fs.writeFileSync(
-    path.join(gatewayDir, "openclaw.json"),
-    JSON.stringify(config, null, 2),
-  );
-
-  // Install skill directories (still keyed by userId for filesystem)
-  await installSkillsForUser(path.join(orgId, member.user_id), skills);
-
-  // Update DB with provisioning status + token + subdomain. A fresh config
-  // already has the locked-down Slack defaults, so there is nothing to migrate.
-  db.prepare(
-    "UPDATE org_members SET gateway_port = ?, gateway_status = ?, gateway_token = ?, gateway_subdomain = ? WHERE id = ?",
-  ).run(port, "provisioning", token, subdomain, memberId);
-  markSlackAccessMigrated(memberId);
-
-  try {
-    // Create and start Docker container
-    const containerName = getContainerName(orgId, member.user_id);
-
-    // Remove existing container if any
-    try {
-      const existing = docker.getContainer(containerName);
-      await existing.stop().catch(() => {});
-      await existing.remove();
-    } catch {
-      // Container doesn't exist, that's fine
-    }
-
-    const container = await docker.createContainer(
-      createContainerConfig(containerName, subdomain, orgId, member.user_id),
-    );
-
-    await container.start();
-
-    // In local dev, read the actual host port Docker allocated
-    const actualPort = (await getHostPort(containerName)) || port;
-    if (actualPort !== port) {
-      db.prepare("UPDATE org_members SET gateway_port = ? WHERE id = ?").run(
-        actualPort,
-        memberId,
-      );
-    }
-
-    // Mark as deploying — getGatewayStatus will promote to running after health check
-    db.prepare("UPDATE org_members SET gateway_status = ? WHERE id = ?").run(
-      "deploying",
-      memberId,
-    );
-
-    return {
-      memberId,
-      userId: member.user_id,
-      gateway_port: actualPort,
-      gateway_status: "deploying" as const,
-      gateway_subdomain: subdomain,
-    };
-  } catch (err) {
-    // Rollback DB on failure
-    db.prepare(
-      "UPDATE org_members SET gateway_port = NULL, gateway_status = NULL, gateway_subdomain = NULL WHERE id = ?",
-    ).run(memberId);
-    throw err;
-  }
-}
-
-export async function stopGateway(orgId: string, memberId: string) {
-  const db = getDb();
-  const member = getMember(orgId, memberId);
-  if (!member.gateway_port) throw new Error("No gateway deployed");
-
-  const containerName = getContainerName(orgId, member.user_id);
-  const container = docker.getContainer(containerName);
-  await container.stop();
-
-  db.prepare("UPDATE org_members SET gateway_status = ? WHERE id = ?").run(
-    "stopped",
-    memberId,
-  );
-
-  return {
-    memberId,
-    userId: member.user_id,
-    gateway_port: member.gateway_port,
-    gateway_status: "stopped" as const,
-  };
-}
-
-export async function startGateway(orgId: string, memberId: string) {
-  const db = getDb();
-  const member = getMember(orgId, memberId);
-  if (!member.gateway_port) throw new Error("No gateway deployed");
-
-  // A key may have changed while this gateway was stopped. Reconcile before it
-  // boots: the importer would otherwise skip the id it already has and the
-  // gateway would come back up on the old credential without saying so.
-  const { profiles, fingerprints } = writeAuthProfiles(orgId, member.user_id);
-  reconcileAuthProfileStore(orgId, member.user_id, profiles, fingerprints);
-
-  const containerName = getContainerName(orgId, member.user_id);
-  const container = docker.getContainer(containerName);
-  await container.start();
-
-  db.prepare("UPDATE org_members SET gateway_status = ? WHERE id = ?").run(
-    "deploying",
-    memberId,
-  );
-
-  return {
-    memberId,
-    userId: member.user_id,
-    gateway_port: member.gateway_port,
-    gateway_status: "deploying" as const,
-  };
-}
-
-export async function removeGateway(orgId: string, memberId: string) {
-  const db = getDb();
-  const member = getMember(orgId, memberId);
-  if (!member.gateway_port) throw new Error("No gateway deployed");
-
-  const containerName = getContainerName(orgId, member.user_id);
-  try {
-    const container = docker.getContainer(containerName);
-    await container.stop().catch(() => {});
-    await container.remove();
-  } catch {
-    // Container may already be removed
-  }
-
-  // Delete workspace
-  const gatewayDir = getGatewayDir(orgId, member.user_id);
-  if (fs.existsSync(gatewayDir)) {
-    fs.rmSync(gatewayDir, { recursive: true });
-  }
-
-  // Reset DB fields
-  db.prepare(
-    "UPDATE org_members SET gateway_port = NULL, gateway_status = NULL, gateway_token = NULL, gateway_subdomain = NULL WHERE id = ?",
-  ).run(memberId);
-
-  return {
-    memberId,
-    userId: member.user_id,
-    gateway_port: null,
-    gateway_status: null,
-    gateway_subdomain: null,
-  };
-}
-
-export async function redeployGateway(orgId: string, memberId: string) {
-  await ensureNetwork();
-  const db = getDb();
-  const member = getMember(orgId, memberId);
-  if (
-    !member.gateway_port ||
-    !member.gateway_token ||
-    !member.gateway_subdomain
-  )
-    throw new Error("No gateway deployed");
-
-  const containerName = getContainerName(orgId, member.user_id);
-
-  // Stop and remove old container
+async function removeContainer(containerName: string): Promise<void> {
   try {
     const existing = docker.getContainer(containerName);
     await existing.stop().catch(() => {});
     await existing.remove();
   } catch {
-    // Container may not exist
+    // Container doesn't exist, that's fine
   }
+}
 
-  // Write auth-profiles.json (credentials read from file, not env vars)
-  const { providerIds, modelOverrides, clawProxyKey, tokenKioskKey, profiles, fingerprints } = writeAuthProfiles(orgId, member.user_id);
-  reconcileAuthProfileStore(orgId, member.user_id, profiles, fingerprints);
-  if (providerIds.length === 0)
+/** What lifecycle calls hand back: the row as the owner may see it, minus the token. */
+function publicState(g: GatewayRow) {
+  return summarizeGateway(g);
+}
+
+/**
+ * (Re)creates an instance's container from its current config. Serves both the
+ * first deploy and every redeploy: the row already holds token and subdomain,
+ * and the config writer merges an existing openclaw.json or generates one.
+ */
+export async function deployGateway(orgId: string, gatewayId: string) {
+  await ensureNetwork();
+  const g = getGatewayRow(orgId, gatewayId);
+  const containerName = containerNameFor(g);
+
+  // Stop and remove old container
+  await removeContainer(containerName);
+
+  fs.mkdirSync(getGatewayDir(g), { recursive: true });
+
+  // Write auth-profiles.json (credentials read from file, not env vars). A key
+  // may have changed since the last boot: reconcile, or the importer would skip
+  // the id it already has and the gateway would come back on the old credential.
+  const auth = writeAuthProfiles(g);
+  reconcileAuthProfileStore(g, auth.profiles, auth.fingerprints);
+  if (auth.providerIds.length === 0)
     throw new Error("No API keys configured — add at least one provider key");
 
-  // Read channel tokens (e.g. Telegram bot token)
-  const channelTokens = getMemberChannelTokens(memberId);
+  writeOpenClawConfig(g, configOptionsFor(g, auth));
 
-  // Update config (keep existing token; skills installed as directories)
-  const skills = getMemberSkills(orgId, member.user_id);
-  const gatewayDir = getGatewayDir(orgId, member.user_id);
-  const configPath = path.join(gatewayDir, "openclaw.json");
-  const clawProxyBaseUrl = process.env.CLAW_PROXY_URL || 'http://claw-proxy:3456/v1';
-  const configOptions = {
-    port: GATEWAY_INTERNAL_PORT,
-    token: member.gateway_token,
-    activeProviderIds: providerIds,
-    modelOverrides,
-    channelTokens,
-    clawProxy: clawProxyKey ? { baseUrl: clawProxyBaseUrl, apiKey: clawProxyKey } : undefined,
-    tokenKiosk: tokenKioskKey ? { baseUrl: getTokenKioskBaseUrl(), apiKey: tokenKioskKey } : undefined,
-    primaryProviderId: getPrimaryProvider(orgId, member.user_id) ?? undefined,
-    ...getControlUiOrigins(member.gateway_subdomain),
-  };
+  // Install skill directories (shared per user, copied into every instance)
+  await installSkillsForUser(path.join(g.org_id, gatewayDirName(g.user_id, g.slot)), getMemberSkills(orgId, g.user_id));
 
-  // Merge into existing config to preserve user customizations;
-  // fall back to fresh generation if no existing config is found.
-  const lockDownLegacySlack = !slackAccessMigrated(memberId);
-  let config;
-  try {
-    const existing = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-    config = mergeOpenClawConfig(existing, configOptions, { lockDownLegacySlack });
-  } catch {
-    config = generateOpenClawConfig(configOptions);
-  }
-  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-  markSlackAccessMigrated(memberId);
-
-  // Install skill directories
-  await installSkillsForUser(path.join(orgId, member.user_id), skills);
-
-  // Create new container (credentials via auth-profiles.json, no env vars needed)
-  const container = await docker.createContainer(
-    createContainerConfig(
-      containerName,
-      member.gateway_subdomain,
-      orgId,
-      member.user_id,
-    ),
-  );
-
+  const container = await docker.createContainer(createContainerConfig(g));
   await container.start();
 
   // In local dev, read the actual host port Docker allocated
-  const actualPort = (await getHostPort(containerName)) || member.gateway_port;
-  if (actualPort !== member.gateway_port) {
-    db.prepare("UPDATE org_members SET gateway_port = ? WHERE id = ?").run(
-      actualPort,
-      memberId,
-    );
+  const port = (await getHostPort(containerName)) || GATEWAY_INTERNAL_PORT;
+  // Mark as deploying — getGatewayStatus will promote to running after health check
+  setGatewayState(g.id, { port, status: "deploying" });
+
+  return publicState(getGatewayRow(orgId, gatewayId));
+}
+
+/**
+ * Adds an instance for a member (subject to their limit) and deploys it. A
+ * failed first deploy leaves nothing behind: the row, directory and any
+ * half-made container are removed before the error is rethrown.
+ */
+export async function createGateway(orgId: string, memberId: string, opts: { label?: string | null } = {}) {
+  const g = createGatewayRow(orgId, memberId, opts);
+  try {
+    return await deployGateway(orgId, g.id);
+  } catch (err) {
+    await removeContainer(containerNameFor(g));
+    fs.rmSync(getGatewayDir(g), { recursive: true, force: true });
+    deleteGatewayRow(g.id);
+    throw err;
   }
+}
 
-  db.prepare("UPDATE org_members SET gateway_status = ? WHERE id = ?").run(
-    "deploying",
-    memberId,
-  );
+export async function stopGateway(orgId: string, gatewayId: string) {
+  const g = getGatewayRow(orgId, gatewayId);
+  await docker.getContainer(containerNameFor(g)).stop();
+  setGatewayState(g.id, { status: "stopped" });
+  return publicState(getGatewayRow(orgId, gatewayId));
+}
 
-  return {
-    memberId,
-    userId: member.user_id,
-    gateway_port: actualPort,
-    gateway_status: "deploying" as const,
-  };
+export async function startGateway(orgId: string, gatewayId: string) {
+  const g = getGatewayRow(orgId, gatewayId);
+
+  // A key may have changed while this gateway was stopped. Reconcile before it
+  // boots: the importer would otherwise skip the id it already has and the
+  // gateway would come back up on the old credential without saying so.
+  const { profiles, fingerprints } = writeAuthProfiles(g);
+  reconcileAuthProfileStore(g, profiles, fingerprints);
+
+  await docker.getContainer(containerNameFor(g)).start();
+  setGatewayState(g.id, { status: "deploying" });
+  return publicState(getGatewayRow(orgId, gatewayId));
+}
+
+/**
+ * Reboots the container as it is — same image, same config files on disk.
+ * Config edits the gateway could not hot-reload take effect; anything the
+ * platform generates (keys, skills, channels) needs deployGateway instead.
+ */
+export async function restartGateway(orgId: string, gatewayId: string) {
+  const g = getGatewayRow(orgId, gatewayId);
+  const { profiles, fingerprints } = writeAuthProfiles(g);
+  reconcileAuthProfileStore(g, profiles, fingerprints);
+
+  await docker.getContainer(containerNameFor(g)).restart();
+  setGatewayState(g.id, { status: "deploying" });
+  return publicState(getGatewayRow(orgId, gatewayId));
+}
+
+/** Removes the container, its port forwards, its workspace and its row. */
+export async function removeGateway(orgId: string, gatewayId: string) {
+  const g = getGatewayRow(orgId, gatewayId);
+
+  await removeContainer(containerNameFor(g));
+  // Files first: the row's DB cascade cannot remove Traefik configs
+  removePortForwardsForGateway(g.id);
+  fs.rmSync(getGatewayDir(g), { recursive: true, force: true });
+  deleteGatewayRow(g.id);
+
+  return { id: g.id, member_id: g.member_id, user_id: g.user_id, slot: g.slot, removed: true };
 }
 
 export async function redeployAllGateways(orgId: string) {
-  const db = getDb();
-  const members = db
-    .prepare(
-      "SELECT id FROM org_members WHERE org_id = ? AND gateway_port IS NOT NULL",
-    )
-    .all(orgId) as { id: string }[];
+  const results: { gatewayId: string; memberId: string; slot: number; status: string | null }[] = [];
+  const errors: { gatewayId: string; memberId: string; slot: number; error: string }[] = [];
 
-  const results: { memberId: string; gateway_status: string }[] = [];
-  const errors: { memberId: string; error: string }[] = [];
-
-  for (const { id: memberId } of members) {
+  for (const g of listOrgGateways(orgId)) {
     try {
-      const result = await redeployGateway(orgId, memberId);
-      results.push({ memberId, gateway_status: result.gateway_status });
+      const result = await deployGateway(orgId, g.id);
+      results.push({ gatewayId: g.id, memberId: g.member_id, slot: g.slot, status: result.status });
     } catch (err: any) {
-      console.error(`Failed to redeploy gateway for member ${memberId}:`, err.message);
-      errors.push({ memberId, error: err.message });
+      console.error(`Failed to redeploy gateway ${refLabel(g)}:`, err.message);
+      errors.push({ gatewayId: g.id, memberId: g.member_id, slot: g.slot, error: err.message });
     }
   }
 
   return { results, errors };
 }
 
-export async function getGatewayStatus(orgId: string, memberId: string) {
-  const db = getDb();
-  const member = getMember(orgId, memberId);
-  if (!member.gateway_port) {
-    return {
-      memberId,
-      userId: member.user_id,
-      gateway_port: null,
-      gateway_status: null,
-      gateway_subdomain: null,
-    };
-  }
-
-  // Sync DB with actual container + health state
-  const containerName = getContainerName(orgId, member.user_id);
-  try {
-    const container = docker.getContainer(containerName);
-    const info = await container.inspect();
-
-    if (!info.State.Running) {
-      if (member.gateway_status !== "stopped") {
-        db.prepare(
-          "UPDATE org_members SET gateway_status = ? WHERE id = ?",
-        ).run("stopped", memberId);
-      }
-      return {
-        memberId,
-        userId: member.user_id,
-        gateway_port: member.gateway_port,
-        gateway_status: "stopped" as const,
-        gateway_subdomain: member.gateway_subdomain,
-      };
+/**
+ * Redeploys the instances a member currently has up, after something every
+ * instance consumes changed (skills). Failures are logged, not raised: the
+ * change itself was already saved.
+ */
+export async function redeployRunningGatewaysForMember(orgId: string, memberId: string): Promise<void> {
+  for (const g of listMemberGateways(memberId)) {
+    if (g.status !== "running" && g.status !== "deploying") continue;
+    try {
+      await deployGateway(orgId, g.id);
+    } catch (err: any) {
+      console.error(`Failed to redeploy gateway ${refLabel(g)}:`, err.message);
     }
-
-    // Container is running — check if gateway HTTP is actually ready
-    const healthy = await checkGatewayHealth(containerName);
-    const actualStatus = healthy ? "running" : "deploying";
-
-    if (actualStatus !== member.gateway_status) {
-      db.prepare("UPDATE org_members SET gateway_status = ? WHERE id = ?").run(
-        actualStatus,
-        memberId,
-      );
-    }
-
-    return {
-      memberId,
-      userId: member.user_id,
-      gateway_port: member.gateway_port,
-      gateway_status: actualStatus,
-      gateway_subdomain: member.gateway_subdomain,
-    };
-  } catch {
-    // Container doesn't exist — mark as stopped
-    if (member.gateway_status !== "stopped") {
-      db.prepare("UPDATE org_members SET gateway_status = ? WHERE id = ?").run(
-        "stopped",
-        memberId,
-      );
-    }
-    return {
-      memberId,
-      userId: member.user_id,
-      gateway_port: member.gateway_port,
-      gateway_status: "stopped" as const,
-      gateway_subdomain: member.gateway_subdomain,
-    };
   }
 }
 
-/** Run a command inside a member's gateway container and return stdout. */
+/** Syncs the row with the real container + health state and returns it. */
+export async function getGatewayStatus(orgId: string, gatewayId: string) {
+  const g = getGatewayRow(orgId, gatewayId);
+  const containerName = containerNameFor(g);
+
+  let actual: "running" | "deploying" | "stopped";
+  try {
+    const info = await docker.getContainer(containerName).inspect();
+    if (!info.State.Running) {
+      actual = "stopped";
+    } else {
+      // Container is running — check if gateway HTTP is actually ready
+      actual = (await checkGatewayHealth(containerName)) ? "running" : "deploying";
+    }
+  } catch {
+    // Container doesn't exist
+    actual = "stopped";
+  }
+
+  if (actual !== g.status) setGatewayState(g.id, { status: actual });
+  return publicState({ ...g, status: actual });
+}
+
+/**
+ * Split a docker attach/exec stream into stdout and stderr. Without a TTY the
+ * daemon multiplexes both into 8-byte-header frames (type, 3 zero bytes,
+ * big-endian length); anything that doesn't parse as frames is passed through
+ * as stdout so a plain stream still works.
+ */
+export function demuxDockerStream(raw: Buffer): { stdout: string; stderr: string } {
+  const out: Buffer[] = [];
+  const err: Buffer[] = [];
+  let offset = 0;
+  while (offset + 8 <= raw.length) {
+    const type = raw[offset];
+    const zeros = raw[offset + 1] === 0 && raw[offset + 2] === 0 && raw[offset + 3] === 0;
+    const size = raw.readUInt32BE(offset + 4);
+    if (!zeros || type > 2 || offset + 8 + size > raw.length) {
+      return { stdout: raw.toString("utf-8"), stderr: "" };
+    }
+    (type === 2 ? err : out).push(raw.subarray(offset + 8, offset + 8 + size));
+    offset += 8 + size;
+  }
+  if (offset !== raw.length) return { stdout: raw.toString("utf-8"), stderr: "" };
+  return { stdout: Buffer.concat(out).toString("utf-8"), stderr: Buffer.concat(err).toString("utf-8") };
+}
+
+/** Run a command inside a gateway container and return its stdout. */
 async function execInContainer(
   containerName: string,
   cmd: string[],
@@ -1017,11 +753,11 @@ async function execInContainer(
     stream.on("end", async () => {
       try {
         const info = await exec.inspect();
-        const output = Buffer.concat(chunks).toString("utf-8");
+        const { stdout, stderr } = demuxDockerStream(Buffer.concat(chunks));
         if (info.ExitCode !== 0) {
-          reject(new Error(output.trim() || `Exit code ${info.ExitCode}`));
+          reject(new Error(stderr.trim() || stdout.trim() || `Exit code ${info.ExitCode}`));
         } else {
-          resolve(output);
+          resolve(stdout);
         }
       } catch (err) {
         reject(err);
@@ -1032,19 +768,21 @@ async function execInContainer(
   });
 }
 
-/** Approve a pairing code for a channel in the member's gateway container. */
+function requireRunning(orgId: string, gatewayId: string): GatewayRow {
+  const g = getGatewayRow(orgId, gatewayId);
+  if (g.status !== "running") throw new Error("Gateway is not running");
+  return g;
+}
+
+/** Approve a pairing code for a channel in the gateway container. */
 export async function approvePairing(
   orgId: string,
-  memberId: string,
+  gatewayId: string,
   channel: string,
   code: string,
 ): Promise<string> {
-  const member = getMember(orgId, memberId);
-  if (member.gateway_status !== "running") {
-    throw new Error("Gateway is not running");
-  }
-  const containerName = getContainerName(orgId, member.user_id);
-  const output = await execInContainer(containerName, [
+  const g = requireRunning(orgId, gatewayId);
+  const output = await execInContainer(containerNameFor(g), [
     "openclaw",
     "pairing",
     "approve",
@@ -1054,33 +792,118 @@ export async function approvePairing(
   return output.trim();
 }
 
+/** List pending pairing requests for a channel. */
+export async function listPairingRequests(
+  orgId: string,
+  gatewayId: string,
+  channel: string,
+): Promise<string> {
+  const g = requireRunning(orgId, gatewayId);
+  const output = await execInContainer(containerNameFor(g), [
+    "openclaw",
+    "pairing",
+    "list",
+    channel,
+  ]);
+  return output.trim();
+}
+
+// OpenClaw request ids are UUIDs; anything else never reaches the CLI.
+const DEVICE_REQUEST_ID = /^[A-Za-z0-9_-]{1,100}$/;
+
+/** Keep only the fields the UI shows — never the device's public key. */
+function toDeviceRequest(p: Record<string, unknown>): DevicePairingRequest {
+  const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+  const list = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : undefined);
+  return {
+    requestId: String(p.requestId),
+    deviceId: String(p.deviceId ?? ""),
+    displayName: str(p.displayName),
+    platform: str(p.platform),
+    deviceFamily: str(p.deviceFamily),
+    clientId: str(p.clientId),
+    clientMode: str(p.clientMode),
+    browserOrigin: str(p.browserOrigin),
+    role: str(p.role),
+    roles: list(p.roles),
+    scopes: list(p.scopes),
+    remoteIp: str(p.remoteIp),
+    isRepair: p.isRepair === true ? true : undefined,
+    ts: typeof p.ts === "number" ? p.ts : 0,
+  };
+}
+
+/** Parse `openclaw devices list --json`, tolerating log lines ahead of the JSON. */
+export function parseDeviceRequests(output: string): DevicePairingRequest[] {
+  const start = output.indexOf("{");
+  if (start < 0) throw new Error("devices list returned no JSON");
+  const parsed = JSON.parse(output.slice(start)) as { pending?: Record<string, unknown>[] };
+  return (parsed.pending ?? []).filter((p) => p && p.requestId).map(toDeviceRequest);
+}
+
+function assertRequestId(requestId: string): void {
+  if (!DEVICE_REQUEST_ID.test(requestId)) throw new Error("Invalid request id");
+}
+
 /**
- * Remove all gateway containers and workspace files for an org.
- * Does NOT touch the DB — caller is responsible for deleting org rows.
+ * Browsers/devices waiting to be approved into an instance's Control UI.
+ * Pairing is never approved automatically (see docker/gateway/entrypoint.sh);
+ * a stopped instance simply has none.
+ */
+export async function listDeviceRequests(orgId: string, gatewayId: string): Promise<DevicePairingRequest[]> {
+  const g = getGatewayRow(orgId, gatewayId);
+  if (g.status !== "running") return [];
+  const output = await execInContainer(containerNameFor(g), ["openclaw", "devices", "list", "--json"]);
+  return parseDeviceRequests(output);
+}
+
+export async function approveDeviceRequest(orgId: string, gatewayId: string, requestId: string): Promise<void> {
+  assertRequestId(requestId);
+  const g = requireRunning(orgId, gatewayId);
+  await execInContainer(containerNameFor(g), ["openclaw", "devices", "approve", requestId, "--json"]);
+}
+
+export async function rejectDeviceRequest(orgId: string, gatewayId: string, requestId: string): Promise<void> {
+  assertRequestId(requestId);
+  const g = requireRunning(orgId, gatewayId);
+  await execInContainer(containerNameFor(g), ["openclaw", "devices", "reject", requestId, "--json"]);
+}
+
+/**
+ * Pending device requests across several instances (a member's, or the whole
+ * org's), each tagged with its instance. Instances are read in parallel; one
+ * that cannot be read is reported in `errors` rather than failing the lot.
+ */
+export async function collectDeviceRequests(
+  gateways: GatewayRow[],
+  describe: (g: GatewayRow) => DeviceRequestList["data"][number]["gateway"] = summarizeGateway,
+): Promise<DeviceRequestList> {
+  const running = gateways.filter((g) => g.status === "running");
+  const results = await Promise.allSettled(running.map((g) => listDeviceRequests(g.org_id, g.id)));
+  const data: DeviceRequestList["data"] = [];
+  const errors: DeviceRequestList["errors"] = [];
+  results.forEach((r, i) => {
+    const g = running[i];
+    if (r.status === "fulfilled") {
+      for (const req of r.value) data.push({ ...req, gateway: describe(g) });
+    } else {
+      errors.push({ gateway_id: g.id, message: r.reason?.message ?? String(r.reason) });
+    }
+  });
+  data.sort((a, b) => b.ts - a.ts);
+  return { data, errors };
+}
+
+/**
+ * Remove all gateway containers, port-forward files and workspace files for an org.
+ * Does NOT delete gateway rows — caller is responsible for deleting org rows.
  */
 export async function deleteOrgGateways(orgId: string): Promise<void> {
-  const db = getDb();
-  const members = db
-    .prepare(
-      "SELECT * FROM org_members WHERE org_id = ? AND gateway_port IS NOT NULL",
-    )
-    .all(orgId) as any[];
-
-  for (const member of members) {
-    const containerName = getContainerName(orgId, member.user_id);
-    try {
-      const container = docker.getContainer(containerName);
-      await container.stop().catch(() => {});
-      await container.remove().catch(() => {});
-    } catch {
-      // Container may already be gone
-    }
-
-    const gatewayDir = getGatewayDir(orgId, member.user_id);
-    if (fs.existsSync(gatewayDir)) {
-      fs.rmSync(gatewayDir, { recursive: true });
-    }
+  for (const g of listOrgGateways(orgId)) {
+    await removeContainer(containerNameFor(g));
+    fs.rmSync(getGatewayDir(g), { recursive: true, force: true });
   }
+  removePortForwardsForOrg(orgId);
 
   // Remove the whole org gateway directory if it exists
   const orgGatewayDir = path.join(getDataDir(), "gateways", orgId);
@@ -1089,45 +912,20 @@ export async function deleteOrgGateways(orgId: string): Promise<void> {
   }
 }
 
-/** Get Docker container IDs for all gateway containers in an org. */
+/** Docker container IDs for every gateway container in an org, keyed by container name. */
 export async function getOrgContainerIds(orgId: string): Promise<Map<string, string>> {
-  const result = new Map<string, string>(); // userId -> containerId
+  const result = new Map<string, string>();
   try {
     const containers = await docker.listContainers({
       all: true,
       filters: { name: [`${CONTAINER_PREFIX}${orgId.slice(0, 8)}-`] },
     });
     for (const c of containers) {
-      // Container name format: /clawhuddle-gw-{orgId8}-{userId8}
-      const name = c.Names[0]?.replace(/^\//, '') || '';
-      const suffix = name.replace(`${CONTAINER_PREFIX}${orgId.slice(0, 8)}-`, '');
-      if (suffix && suffix !== name) {
-        // Map the 8-char userId prefix back — caller matches against full userId
-        result.set(suffix, c.Id);
-      }
+      const name = c.Names[0]?.replace(/^\//, "");
+      if (name) result.set(name, c.Id);
     }
   } catch {
     // Docker may be unavailable
   }
   return result;
-}
-
-/** List pending pairing requests for a channel. */
-export async function listPairingRequests(
-  orgId: string,
-  memberId: string,
-  channel: string,
-): Promise<string> {
-  const member = getMember(orgId, memberId);
-  if (member.gateway_status !== "running") {
-    throw new Error("Gateway is not running");
-  }
-  const containerName = getContainerName(orgId, member.user_id);
-  const output = await execInContainer(containerName, [
-    "openclaw",
-    "pairing",
-    "list",
-    channel,
-  ]);
-  return output.trim();
 }

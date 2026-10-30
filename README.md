@@ -156,6 +156,7 @@ This starts Traefik, the web frontend, the API server, and builds the gateway ba
 | `ANTHROPIC_API_KEY`         | Default Anthropic API key                                           | —                       |
 | `SUPER_ADMIN_EMAIL`         | Super admin account email                                           | —                       |
 | `MAX_MEMBERS_PER_ORG`       | Member limit per organization                                       | `50`                    |
+| `MAX_GATEWAYS_PER_USER`     | Gateway instances one member may run; org admins can raise it per org or per member | `1`         |
 | `RESEND_API_KEY`            | Resend API key for invitation emails                                | —                       |
 | `EMAIL_FROM`                | Sender address for emails                                           | —                       |
 | `APP_URL`                   | Public app URL, used in invitation email links                      | `http://localhost:3000` |

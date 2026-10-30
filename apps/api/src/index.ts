@@ -1,6 +1,5 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
-import crypto from 'node:crypto';
 import dotenv from 'dotenv';
 dotenv.config({ path: '../../.env' });
 import { authRoutes } from './routes/auth.js';
@@ -11,32 +10,15 @@ import { orgSkillRoutes } from './routes/org/skills.js';
 import { orgApiKeyRoutes } from './routes/org/api-keys.js';
 import { orgGatewayRoutes } from './routes/org/gateways.js';
 import { orgUserSkillRoutes } from './routes/org/user-skills.js';
-import { orgMemberChannelRoutes } from './routes/org/member-channels.js';
 import { orgChatRoutes } from './routes/org/chat.js';
 import { orgPortForwardRoutes } from './routes/org/port-forwards.js';
 import { superAdminRoutes } from './routes/super-admin.js';
-import { getDb } from './db/index.js';
 import { syncAllPortForwards } from './services/port-forward.js';
 
 // Refuse to start without the secret API tokens are verified with
 getApiAuthSecret();
 
 const app = Fastify({ logger: true });
-
-// Backfill subdomains for existing gateways that don't have one
-{
-  const db = getDb();
-  const rows = db.prepare(
-    'SELECT id FROM org_members WHERE gateway_port IS NOT NULL AND gateway_subdomain IS NULL'
-  ).all() as { id: string }[];
-  if (rows.length > 0) {
-    const stmt = db.prepare('UPDATE org_members SET gateway_subdomain = ? WHERE id = ?');
-    for (const row of rows) {
-      stmt.run(crypto.randomBytes(4).toString('hex'), row.id);
-    }
-    console.log(`Backfilled gateway_subdomain for ${rows.length} members`);
-  }
-}
 
 await app.register(cors, {
   origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
@@ -60,7 +42,6 @@ await app.register(async function orgScopedRoutes(instance) {
   await instance.register(orgApiKeyRoutes);
   await instance.register(orgGatewayRoutes);
   await instance.register(orgUserSkillRoutes);
-  await instance.register(orgMemberChannelRoutes);
   await instance.register(orgChatRoutes);
   await instance.register(orgPortForwardRoutes);
 });

@@ -2,7 +2,6 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 /**
  * Locking down the pre-2026-10-21 wide-open Slack default is a one-time
@@ -13,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 const ORG = 'org-1';
 const USER = 'user-1';
 const MEMBER = 'member-1';
+const GATEWAY = 'gw-1';
 let tmpDir: string;
 
 const configPath = () => path.join(tmpDir, 'data', 'gateways', ORG, USER, 'openclaw.json');
@@ -40,21 +40,14 @@ beforeAll(async () => {
 
   const { getDb } = await import('../db/index.js');
   const db = getDb();
-  const dbDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '../db');
-  db.exec(fs.readFileSync(path.join(dbDir, 'schema.sql'), 'utf-8'));
-  // Same as migrate.ts: migrations already folded into schema.sql fail and are skipped
-  for (const file of fs.readdirSync(path.join(dbDir, 'migrations')).sort()) {
-    try {
-      db.exec(fs.readFileSync(path.join(dbDir, 'migrations', file), 'utf-8'));
-    } catch {
-      // already applied
-    }
-  }
+  const { applyMigrations } = await import('../db/apply-migrations.js');
+  applyMigrations(db, () => {});
   db.prepare('INSERT INTO organizations (id, name, slug) VALUES (?, ?, ?)').run(ORG, 'Org', 'org');
   db.prepare('INSERT INTO users (id, email) VALUES (?, ?)').run(USER, 'member@example.com');
+  db.prepare("INSERT INTO org_members (id, org_id, user_id, role) VALUES (?, ?, ?, 'member')").run(MEMBER, ORG, USER);
   db.prepare(
-    "INSERT INTO org_members (id, org_id, user_id, role, gateway_port, gateway_status, gateway_token, gateway_subdomain) VALUES (?, ?, ?, 'member', 6100, 'stopped', 'gw-token', 'claw-test')",
-  ).run(MEMBER, ORG, USER);
+    "INSERT INTO gateways (id, org_id, member_id, slot, status, port, token, subdomain) VALUES (?, ?, ?, 1, 'stopped', 6100, 'gw-token', 'claw-test')",
+  ).run(GATEWAY, ORG, MEMBER);
 
   fs.mkdirSync(path.dirname(configPath()), { recursive: true });
   fs.writeFileSync(configPath(), JSON.stringify({ channels: { slack: legacyOpenSlack } }));
@@ -73,7 +66,7 @@ describe('legacy-open Slack lockdown', () => {
 
     expect(readConfig().channels.slack).toMatchObject({ dmPolicy: 'pairing', groupPolicy: 'allowlist', allowBots: false });
     const { getDb } = await import('../db/index.js');
-    const row = getDb().prepare('SELECT slack_access_migrated_at FROM org_members WHERE id = ?').get(MEMBER) as {
+    const row = getDb().prepare('SELECT slack_access_migrated_at FROM gateways WHERE id = ?').get(GATEWAY) as {
       slack_access_migrated_at: string | null;
     };
     expect(row.slack_access_migrated_at).not.toBeNull();

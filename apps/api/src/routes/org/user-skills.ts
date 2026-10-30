@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { getDb } from '../../db/index.js';
-import { redeployGateway } from '../../services/gateway.js';
+import { redeployRunningGatewaysForMember } from '../../services/gateway.js';
 import type { Skill, BatchUpdateUserSkillsRequest } from '@clawhuddle/shared';
 
 interface SkillWithUserStatus extends Skill {
@@ -77,15 +77,8 @@ export async function orgUserSkillRoutes(app: FastifyInstance) {
       });
       tx();
 
-      // Single redeploy at the end
-      const member = request.orgMember!;
-      if (member.gateway_port && (member.gateway_status === 'running' || member.gateway_status === 'deploying')) {
-        try {
-          await redeployGateway(orgId, memberId);
-        } catch {
-          // Redeploy failed, but skill toggles were saved
-        }
-      }
+      // Skills are shared by every instance the member runs: redeploy the live ones once
+      await redeployRunningGatewaysForMember(orgId, memberId);
 
       return { data: { updated: updates.length } };
     }
@@ -121,15 +114,7 @@ export async function orgUserSkillRoutes(app: FastifyInstance) {
          ON CONFLICT(user_id, skill_id) DO UPDATE SET enabled = ?`
       ).run(userId, id, enabled ? 1 : 0, enabled ? 1 : 0);
 
-      // Auto-redeploy if gateway is running or deploying
-      const member = request.orgMember!;
-      if (member.gateway_port && (member.gateway_status === 'running' || member.gateway_status === 'deploying')) {
-        try {
-          await redeployGateway(orgId, memberId);
-        } catch {
-          // Redeploy failed, but skill toggle was saved
-        }
-      }
+      await redeployRunningGatewaysForMember(orgId, memberId);
 
       return { data: { skill_id: id, enabled } };
     }

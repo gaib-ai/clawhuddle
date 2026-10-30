@@ -9,6 +9,11 @@ declare module 'fastify' {
   interface FastifyRequest {
     currentUser?: User;
     orgId?: string;
+    /**
+     * The caller's membership row. Its gateway_* columns only mirror the slot-1
+     * instance for rollback compatibility — use the `gateways` table (via
+     * services/gateway-store.ts) for anything about instances.
+     */
     orgMember?: OrgMember;
   }
 }

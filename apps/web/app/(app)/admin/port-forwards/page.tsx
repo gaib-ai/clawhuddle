@@ -3,10 +3,13 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useOrgFetch } from '@/lib/use-org-fetch';
 import { useToast } from '@/components/ui/toast';
+import { gatewayLabel } from '@/lib/gateway-url';
+import type { GatewaySummary } from '@clawhuddle/shared';
 
 interface PortForward {
   id: string;
   member_id: string;
+  gateway_id: string | null;
   subdomain: string;
   hostname: string;
   port: number;
@@ -15,28 +18,27 @@ interface PortForward {
   member_email: string;
   member_name: string | null;
   gateway_status: string | null;
+  gateway_label: string | null;
+  gateway_slot: number | null;
 }
 
-interface Member {
-  id: string;
-  email: string;
-  name: string | null;
-  gateway_status: string | null;
-}
+/** "Instance 2 · Jane" — the picker shows every instance in the org. */
+const describeGateway = (g: GatewaySummary) =>
+  `${gatewayLabel(g)} · ${g.name || g.email}${g.status === 'running' ? '' : ` (${g.status ?? 'not running'})`}`;
 
 export default function PortForwardsPage() {
   const { orgFetch, ready } = useOrgFetch();
   const { toast } = useToast();
   const [forwards, setForwards] = useState<PortForward[]>([]);
-  const [members, setMembers] = useState<Member[]>([]);
+  const [gateways, setGateways] = useState<GatewaySummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [edit, setEdit] = useState({ memberId: '', subdomain: '', port: '', description: '' });
+  const [edit, setEdit] = useState({ gatewayId: '', subdomain: '', port: '', description: '' });
 
-  const [memberId, setMemberId] = useState('');
+  const [gatewayId, setGatewayId] = useState('');
   const [subdomain, setSubdomain] = useState('');
   const [port, setPort] = useState('');
   const [description, setDescription] = useState('');
@@ -48,12 +50,12 @@ export default function PortForwardsPage() {
   const fetchAll = useCallback(async () => {
     if (!orgFetch) return;
     try {
-      const [fwRes, memberRes] = await Promise.all([
+      const [fwRes, gwRes] = await Promise.all([
         orgFetch<{ data: PortForward[] }>('/port-forwards'),
-        orgFetch<{ data: Member[] }>('/members'),
+        orgFetch<{ data: GatewaySummary[] }>('/gateways'),
       ]);
       setForwards(fwRes.data);
-      setMembers(memberRes.data);
+      setGateways(gwRes.data);
     } catch {
       // ignore
     } finally {
@@ -73,7 +75,7 @@ export default function PortForwardsPage() {
       await orgFetch('/port-forwards', {
         method: 'POST',
         body: JSON.stringify({
-          memberId,
+          gatewayId,
           subdomain: subdomain.trim().toLowerCase(),
           port: Number(port),
           description: description.trim() || undefined,
@@ -94,7 +96,7 @@ export default function PortForwardsPage() {
   const startEdit = (fw: PortForward) => {
     setEditingId(fw.id);
     setEdit({
-      memberId: fw.member_id,
+      gatewayId: fw.gateway_id ?? '',
       subdomain: fw.subdomain,
       port: String(fw.port),
       description: fw.description || '',
@@ -108,7 +110,7 @@ export default function PortForwardsPage() {
       await orgFetch(`/port-forwards/${editingId}`, {
         method: 'PATCH',
         body: JSON.stringify({
-          memberId: edit.memberId,
+          gatewayId: edit.gatewayId,
           subdomain: edit.subdomain.trim().toLowerCase(),
           port: Number(edit.port),
           description: edit.description.trim() || null,
@@ -161,7 +163,7 @@ export default function PortForwardsPage() {
         Port Forwards
       </h1>
       <p className="text-sm mb-6" style={{ color: 'var(--text-tertiary)' }}>
-        Expose a port inside a member&apos;s gateway container on a public subdomain. The service must
+        Expose a port inside a gateway instance on a public subdomain. The service must
         listen on <code>0.0.0.0</code> at the chosen port inside the container.
       </p>
 
@@ -172,20 +174,18 @@ export default function PortForwardsPage() {
       >
         <div className="flex flex-col gap-1.5">
           <label className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-tertiary)' }}>
-            Member
+            Instance
           </label>
           <select
             required
-            value={memberId}
-            onChange={(e) => setMemberId(e.target.value)}
+            value={gatewayId}
+            onChange={(e) => setGatewayId(e.target.value)}
             className="rounded-lg px-3 py-2 text-sm min-w-52"
             style={inputStyle}
           >
-            <option value="">Select member...</option>
-            {members.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name || m.email}{m.gateway_status ? '' : ' (no gateway)'}
-              </option>
+            <option value="">Select instance...</option>
+            {gateways.map((g) => (
+              <option key={g.id} value={g.id}>{describeGateway(g)}</option>
             ))}
           </select>
         </div>
@@ -254,7 +254,7 @@ export default function PortForwardsPage() {
           style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)' }}
         >
           <p className="text-sm" style={{ color: 'var(--text-tertiary)' }}>
-            No port forwards yet. Create one above to expose a service running inside a member&apos;s gateway.
+            No port forwards yet. Create one above to expose a service running inside a gateway instance.
           </p>
         </div>
       ) : (
@@ -265,7 +265,7 @@ export default function PortForwardsPage() {
           <table className="w-full text-sm">
             <thead>
               <tr style={{ borderBottom: '1px solid var(--border-primary)' }}>
-                {['URL', 'Member', 'Port', 'Description', 'Created', 'Actions'].map((h) => (
+                {['URL', 'Instance', 'Port', 'Description', 'Created', 'Actions'].map((h) => (
                   <th
                     key={h}
                     className="px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-wider"
@@ -297,15 +297,14 @@ export default function PortForwardsPage() {
                       </td>
                       <td className="px-4 py-3">
                         <select
-                          value={edit.memberId}
-                          onChange={(e) => setEdit({ ...edit, memberId: e.target.value })}
+                          value={edit.gatewayId}
+                          onChange={(e) => setEdit({ ...edit, gatewayId: e.target.value })}
                           className="rounded-lg px-2 py-1.5 text-sm w-full"
                           style={inputStyle}
                         >
-                          {members.map((m) => (
-                            <option key={m.id} value={m.id}>
-                              {m.name || m.email}{m.gateway_status ? '' : ' (no gateway)'}
-                            </option>
+                          <option value="">Select instance...</option>
+                          {gateways.map((g) => (
+                            <option key={g.id} value={g.id}>{describeGateway(g)}</option>
                           ))}
                         </select>
                       </td>
@@ -379,9 +378,10 @@ export default function PortForwardsPage() {
                       </a>
                     </td>
                     <td className="px-4 py-3" style={{ color: 'var(--text-primary)' }}>
-                      {fw.member_name || fw.member_email}
-                      {!fw.gateway_status && (
-                        <span className="ml-2 text-[11px]" style={{ color: 'var(--yellow)' }}>no gateway</span>
+                      {fw.gateway_slot ? gatewayLabel({ label: fw.gateway_label, slot: fw.gateway_slot }) : 'Instance'}
+                      <span className="ml-1 text-xs" style={{ color: 'var(--text-tertiary)' }}>· {fw.member_name || fw.member_email}</span>
+                      {fw.gateway_status !== 'running' && (
+                        <span className="ml-2 text-[11px]" style={{ color: 'var(--yellow)' }}>{fw.gateway_status ?? 'no gateway'}</span>
                       )}
                     </td>
                     <td className="px-4 py-3" style={{ color: 'var(--text-primary)' }}>{fw.port}</td>

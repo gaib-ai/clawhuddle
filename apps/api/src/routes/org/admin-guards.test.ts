@@ -3,7 +3,6 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { signApiToken } from '@clawhuddle/shared';
 
 /**
@@ -18,6 +17,7 @@ const OWNER = { id: 'user-owner', email: 'owner@example.com' };
 const ADMIN = { id: 'user-admin', email: 'admin@example.com' };
 const MEMBER = { id: 'user-member', email: 'member@example.com' };
 const INVITEE = { id: 'user-invitee', email: 'invitee@example.com' };
+const ADMIN_GATEWAY = 'gw-admin';
 
 let tmpDir: string;
 let app: FastifyInstance;
@@ -38,9 +38,8 @@ beforeAll(async () => {
 
   const { getDb } = await import('../../db/index.js');
   const db = getDb();
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  db.exec(fs.readFileSync(path.join(here, '../../db/schema.sql'), 'utf-8'));
-  db.exec(fs.readFileSync(path.join(here, '../../db/migrations/015-port-forwards.sql'), 'utf-8'));
+  const { applyMigrations } = await import('../../db/apply-migrations.js');
+  applyMigrations(db, () => {});
   db.prepare('INSERT INTO organizations (id, name, slug) VALUES (?, ?, ?)').run(ORG, 'Org', 'org');
   db.prepare('INSERT INTO users (id, email) VALUES (?, ?)').run(INVITEE.id, INVITEE.email);
   for (const [u, role] of [[OWNER, 'owner'], [ADMIN, 'admin'], [MEMBER, 'member']] as const) {
@@ -49,6 +48,9 @@ beforeAll(async () => {
       `om-${u.id}`, ORG, u.id, role,
     );
   }
+  db.prepare(
+    "INSERT INTO gateways (id, org_id, member_id, slot, status, port, token, subdomain) VALUES (?, ?, ?, 1, 'running', 6100, 'tok', 'claw-admin')",
+  ).run(ADMIN_GATEWAY, ORG, `om-${ADMIN.id}`);
 
   const { authRoutes } = await import('../auth.js');
   const { orgPlugin } = await import('../../middleware/auth.js');
@@ -77,7 +79,7 @@ describe('port forwards', () => {
       method: 'POST',
       url: `/api/orgs/${ORG}/port-forwards`,
       headers: await as(ADMIN),
-      payload: { memberId: `om-${ADMIN.id}`, port: 8080, ...body },
+      payload: { gatewayId: ADMIN_GATEWAY, port: 8080, ...body },
     });
 
   it('writes a config Traefik reads as exactly one router and service', async () => {
@@ -92,6 +94,7 @@ describe('port forwards', () => {
       [`pf-${id}`]: { rule: 'Host(`webhook.example.com`)', entryPoints: ['web'], service: `pf-${id}` },
     });
     expect(Object.keys(config.http.services)).toEqual([`pf-${id}`]);
+    expect(config.http.services[`pf-${id}`].loadBalancer.servers).toEqual([{ url: 'http://clawhuddle-gw-org-1-user-adm:8080' }]);
     expect(file).not.toContain('Webhook receiver');
   });
 
