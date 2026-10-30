@@ -2,8 +2,10 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useEffect, useState } from 'react';
 import { useSession, signOut } from 'next-auth/react';
 import { useOrg } from '@/lib/org-context';
+import { useOrgFetch } from '@/lib/use-org-fetch';
 import { useSuperAdmin } from '@/lib/use-super-admin';
 import { OrgSwitcher } from './org-switcher';
 import { ClawHuddleLogo } from './logo';
@@ -25,6 +27,13 @@ const icons = {
   channels: (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+    </svg>
+  ),
+  devices: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+      <line x1="8" y1="21" x2="16" y2="21"/>
+      <line x1="12" y1="17" x2="12" y2="21"/>
     </svg>
   ),
   members: (
@@ -86,11 +95,13 @@ function NavItem({
   icon,
   label,
   active,
+  badge,
 }: {
   href: string;
   icon: React.ReactNode;
   label: string;
   active: boolean;
+  badge?: number;
 }) {
   return (
     <Link
@@ -114,7 +125,15 @@ function NavItem({
       }}
     >
       <span style={{ opacity: active ? 1 : 0.5 }}>{icon}</span>
-      {label}
+      <span className="flex-1">{label}</span>
+      {badge ? (
+        <span
+          className="text-[10px] font-semibold tabular-nums px-1.5 py-0.5 rounded-full"
+          style={{ background: 'var(--accent)', color: 'var(--text-inverse)' }}
+        >
+          {badge}
+        </span>
+      ) : null}
     </Link>
   );
 }
@@ -130,6 +149,28 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
+/**
+ * Browsers waiting to be let into one of my instances. Only my own instances
+ * are counted (admins see the org-wide list on the page itself); polled
+ * slowly since every poll runs a command in each running container.
+ */
+function usePendingDeviceCount(): number {
+  const { orgFetch } = useOrgFetch();
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    if (!orgFetch) return;
+    let cancelled = false;
+    const load = () =>
+      orgFetch<{ data: unknown[] }>('/me/device-requests')
+        .then((res) => { if (!cancelled) setCount(res.data.length); })
+        .catch(() => {});
+    load();
+    const timer = setInterval(load, 30000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [orgFetch]);
+  return count;
+}
+
 /* ─── Sidebar ─── */
 
 export function AppSidebar() {
@@ -138,6 +179,7 @@ export function AppSidebar() {
   const { currentOrgId, memberRole } = useOrg();
   const isAdmin = memberRole === 'admin' || memberRole === 'owner';
   const isSuperAdmin = useSuperAdmin();
+  const pendingDevices = usePendingDeviceCount();
 
   return (
     <aside
@@ -173,6 +215,7 @@ export function AppSidebar() {
               <NavItem href="/home" icon={icons.home} label="Home" active={pathname === '/home'} />
               <NavItem href="/skills" icon={icons.skills} label="My Skills" active={pathname.startsWith('/skills')} />
               <NavItem href="/channels" icon={icons.channels} label="Channels" active={pathname.startsWith('/channels')} />
+              <NavItem href="/devices" icon={icons.devices} label="Device Requests" active={pathname.startsWith('/devices')} badge={pendingDevices} />
               <NavItem href="/api-keys" icon={icons.keys} label="My API Keys" active={pathname.startsWith('/api-keys')} />
             </div>
 
