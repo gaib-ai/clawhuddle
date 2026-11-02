@@ -31,7 +31,7 @@ import {
   type GatewayRef,
   type GatewayRow,
 } from "./gateway-store.js";
-import type { DevicePairingRequest, DeviceRequestList, Skill } from "@clawhuddle/shared";
+import type { DevicePairingRequest, DeviceRequestList, SecretInjectionState, Skill } from "@clawhuddle/shared";
 import { PROVIDERS } from "@clawhuddle/shared";
 
 export { getContainerName, GatewayLimitError } from "./gateway-store.js";
@@ -153,6 +153,15 @@ function createTraefikLabels(
  * own database, which reconcile needs to tell an operator replacing a key apart
  * from OpenClaw refreshing one.
  */
+/** A non-LLM credential bound for the instance's OpenClaw secret store. */
+export interface ManagedSecret {
+  provider: string;
+  name: string;
+  allowedHosts: string[];
+  skill?: string;
+  value: string;
+}
+
 function writeAuthProfiles(ref: GatewayRef, persist = true): {
   providerIds: string[];
   modelOverrides: Record<string, string>;
@@ -160,11 +169,13 @@ function writeAuthProfiles(ref: GatewayRef, persist = true): {
   tokenKioskKey: string | null;
   profiles: Record<string, Record<string, unknown>>;
   fingerprints: Record<string, string>;
+  secrets: ManagedSecret[];
 } {
   const allKeys = getResolvedApiKeysForMember(ref.org_id, ref.user_id);
   const profiles: Record<string, Record<string, unknown>> = {};
   const fingerprints: Record<string, string> = {};
   const providerIds: string[] = [];
+  const secrets: ManagedSecret[] = [];
   const modelOverrides: Record<string, string> = {};
   const order: Record<string, string[]> = {};
   const providerCounters: Record<string, number> = {};
@@ -183,6 +194,14 @@ function writeAuthProfiles(ref: GatewayRef, persist = true): {
 
     const providerConfig = PROVIDERS.find((p) => p.id === provider);
     if (!providerConfig) continue;
+    // Secret-store credentials (Notion) never touch auth-profiles.json and do
+    // not count as a provider; ensureGatewaySecrets puts them in the store.
+    if (providerConfig.kind === 'secret') {
+      if (providerConfig.secret && !secrets.some((s) => s.name === providerConfig.secret!.name)) {
+        secrets.push({ provider, value: key, ...providerConfig.secret });
+      }
+      continue;
+    }
     if (!providerIds.includes(provider)) providerIds.push(provider);
     if (default_model && !modelOverrides[provider]) modelOverrides[provider] = default_model;
 
@@ -271,7 +290,165 @@ function writeAuthProfiles(ref: GatewayRef, persist = true): {
     );
   }
 
-  return { providerIds, modelOverrides, clawProxyKey, tokenKioskKey, profiles, fingerprints };
+  return { providerIds, modelOverrides, clawProxyKey, tokenKioskKey, profiles, fingerprints, secrets };
+}
+
+// ---------------------------------------------------------------------------
+// Secret store (non-LLM credentials such as the Notion token)
+//
+// The value goes into the instance's OpenClaw secret store (SQLite under the
+// state dir, so it survives redeploys) with `openclaw secrets store set`, run
+// inside the container once the gateway is up. The bundled skill is then
+// pointed at the entry with a store ref in openclaw.json. Order matters: an
+// unresolved ref makes OpenClaw refuse to start or reload, so the ref is only
+// written once the entry is known to be there (recorded in a state file).
+//
+// Entries a member created themselves (same name, no record of ours) are left
+// alone: Michael's gateway carries his own NOTION_API_TOKEN.
+// ---------------------------------------------------------------------------
+
+type SecretState = Record<string, { fingerprint: string | null }>;
+
+function secretStatePath(ref: GatewayRef): string {
+  return path.join(getGatewayDir(ref), ".clawhuddle-secrets.json");
+}
+
+/** What we know is in the store: name -> our fingerprint (null = member-managed). Undefined = never looked. */
+function readSecretState(ref: GatewayRef): SecretState | undefined {
+  try {
+    return JSON.parse(fs.readFileSync(secretStatePath(ref), "utf-8")) as SecretState;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Store refs for every platform-known secret present in the store, from the state file. */
+function secretRefsFor(ref: GatewayRef): { skill: string; name: string }[] | undefined {
+  const state = readSecretState(ref);
+  if (!state) return undefined;
+  return PROVIDERS.flatMap((p) =>
+    p.secret?.skill && state[p.secret.name] ? [{ skill: p.secret.skill, name: p.secret.name }] : [],
+  );
+}
+
+const secretFingerprint = (value: string) => crypto.createHash("sha256").update(value).digest("hex").slice(0, 16);
+
+/** True when a resolved secret is not yet known to be in the store as we hold it. */
+function secretsOutOfDate(ref: GatewayRef, secrets: ManagedSecret[]): boolean {
+  if (secrets.length === 0) return false;
+  const state = readSecretState(ref);
+  if (!state) return true;
+  return secrets.some((s) => {
+    const rec = state[s.name];
+    return !rec || (rec.fingerprint !== null && rec.fingerprint !== secretFingerprint(s.value));
+  });
+}
+
+/**
+ * Per secret-kind provider, where this instance stands (for the API Keys
+ * pages). `member` wins over everything: an entry the member created is never
+ * touched, whatever key the org holds.
+ */
+export function secretStatusFor(g: GatewayRow): Record<string, SecretInjectionState> {
+  const resolved = new Map(writeAuthProfiles(g, false).secrets.map((s) => [s.provider, s] as const));
+  const state = readSecretState(g);
+  const out: Record<string, SecretInjectionState> = {};
+  for (const p of PROVIDERS) {
+    if (p.kind !== "secret" || !p.secret) continue;
+    const rec = state?.[p.secret.name];
+    const s = resolved.get(p.id);
+    if (rec && rec.fingerprint === null) out[p.id] = "member";
+    else if (!s) out[p.id] = "none";
+    else if (rec && rec.fingerprint === secretFingerprint(s.value)) out[p.id] = "injected";
+    else out[p.id] = "pending";
+  }
+  return out;
+}
+
+const secretSyncInFlight = new Map<string, Promise<void>>();
+
+/**
+ * Bring a RUNNING instance's secret store in line with the member's resolved
+ * secret-kind keys, then (re)write openclaw.json so the skill refs match.
+ * Idempotent; one run per gateway at a time; never throws.
+ */
+export function ensureGatewaySecrets(g: GatewayRow): Promise<void> {
+  const inFlight = secretSyncInFlight.get(g.id);
+  if (inFlight) return inFlight;
+  const run = syncGatewaySecrets(g)
+    .catch((err) => console.warn(`[gateway] secret sync failed for ${refLabel(g)}:`, err))
+    .finally(() => secretSyncInFlight.delete(g.id));
+  secretSyncInFlight.set(g.id, run);
+  return run;
+}
+
+async function syncGatewaySecrets(g: GatewayRow): Promise<void> {
+  const containerName = containerNameFor(g);
+  if (!(await checkGatewayHealth(containerName))) return;
+
+  const desired = writeAuthProfiles(g, false).secrets;
+  const listed = JSON.parse(
+    await execInContainer(containerName, ["openclaw", "secrets", "store", "list", "--json"], 30000),
+  ) as { name: string }[];
+  const inStore = new Set(listed.map((e) => e.name));
+  const before = readSecretState(g);
+  const state: SecretState = { ...(before ?? {}) };
+
+  for (const name of inStore) if (!state[name]) state[name] = { fingerprint: null }; // member-managed
+  for (const name of Object.keys(state)) if (!inStore.has(name)) delete state[name];
+
+  let injected = 0;
+  for (const s of desired) {
+    const rec = state[s.name];
+    const fp = secretFingerprint(s.value);
+    if (rec && rec.fingerprint === null) continue;            // the member's own entry
+    if (rec && rec.fingerprint === fp) continue;              // already ours, unchanged
+    const valueFile = `.clawhuddle-secret-${s.name}`;
+    const hostPath = path.join(getGatewayDir(g), valueFile);
+    fs.writeFileSync(hostPath, s.value, { mode: 0o600 });
+    try {
+      await execInContainer(containerName, [
+        "openclaw", "secrets", "store", "set", s.name, "--kind", "secret",
+        ...s.allowedHosts.flatMap((h) => ["--allow-host", h]),
+        "--value-file", `/root/.openclaw/${valueFile}`,
+      ], 30000);
+    } finally {
+      fs.rmSync(hostPath, { force: true });
+    }
+    state[s.name] = { fingerprint: fp };
+    injected++;
+    console.log(`[gateway] secret ${s.name} set in store for ${refLabel(g)} (${s.allowedHosts.join(", ")})`);
+  }
+
+  if (injected > 0) {
+    // The reload RPC waits for in-flight turns; 30 s took it over the line on a busy gateway.
+    await execInContainer(containerName, ["openclaw", "secrets", "reload"], 120000)
+      .catch((err) => console.warn(`[gateway] secrets reload failed for ${refLabel(g)}:`, err));
+  }
+
+  const changed = JSON.stringify(before ?? null) !== JSON.stringify(state);
+  if (changed) {
+    fs.writeFileSync(secretStatePath(g), JSON.stringify(state, null, 2), { mode: 0o600 });
+    // Refs follow the state file; openclaw.json hot-reloads.
+    regenerateGatewayConfig(getGatewayRow(g.org_id, g.id));
+  }
+}
+
+/** After a (re)start: wait for the gateway to come up, then sync its secret store. */
+function scheduleSecretSync(g: GatewayRow): void {
+  const containerName = containerNameFor(g);
+  const deadline = Date.now() + 15 * 60 * 1000;
+  const tick = async () => {
+    if (Date.now() > deadline) return;
+    try {
+      if (await checkGatewayHealth(containerName)) {
+        await ensureGatewaySecrets(getGatewayRow(g.org_id, g.id));
+        return;
+      }
+    } catch { /* gone, or not yet there */ }
+    setTimeout(tick, 15000).unref();
+  };
+  setTimeout(tick, 15000).unref();
 }
 
 const TOKEN_KIOSK_DEFAULT_URL = 'https://agent-router.gaib.ai/v1';
@@ -410,6 +587,7 @@ function configOptionsFor(
     tokenKiosk: auth.tokenKioskKey ? { baseUrl: getTokenKioskBaseUrl(), apiKey: auth.tokenKioskKey } : undefined,
     primaryProviderId: pin.provider ?? undefined,
     primaryModel: pin.model ?? undefined,
+    secretRefs: secretRefsFor(g),
     ...getControlUiOrigins(g.subdomain),
   };
 }
@@ -471,7 +649,7 @@ function regenerateGatewayConfig(g: GatewayRow): boolean {
  */
 export function syncAuthProfiles(orgId: string): void {
   for (const g of listOrgGateways(orgId)) {
-    regenerateGatewayConfig(g);
+    if (regenerateGatewayConfig(g) && g.status === "running") void ensureGatewaySecrets(g);
   }
 }
 
@@ -481,7 +659,7 @@ export function syncAuthProfiles(orgId: string): void {
  */
 export function syncAuthProfilesForUser(orgId: string, userId: string): void {
   for (const g of listUserGateways(orgId, userId)) {
-    regenerateGatewayConfig(g);
+    if (regenerateGatewayConfig(g) && g.status === "running") void ensureGatewaySecrets(g);
   }
 }
 
@@ -585,6 +763,7 @@ export async function deployGateway(orgId: string, gatewayId: string) {
   const port = (await getHostPort(containerName)) || GATEWAY_INTERNAL_PORT;
   // Mark as deploying — getGatewayStatus will promote to running after health check
   setGatewayState(g.id, { port, status: "deploying" });
+  scheduleSecretSync(g);
 
   return publicState(getGatewayRow(orgId, gatewayId));
 }
@@ -639,6 +818,7 @@ export async function restartGateway(orgId: string, gatewayId: string) {
 
   await docker.getContainer(containerNameFor(g)).restart();
   setGatewayState(g.id, { status: "deploying" });
+  scheduleSecretSync(g);
   return publicState(getGatewayRow(orgId, gatewayId));
 }
 
@@ -708,6 +888,9 @@ export async function getGatewayStatus(orgId: string, gatewayId: string) {
   }
 
   if (actual !== g.status) setGatewayState(g.id, { status: actual });
+  if (actual === "running" && (g.status !== "running" || secretsOutOfDate(g, writeAuthProfiles(g, false).secrets))) {
+    void ensureGatewaySecrets({ ...g, status: actual });
+  }
   return publicState({ ...g, status: actual });
 }
 
@@ -739,6 +922,7 @@ export function demuxDockerStream(raw: Buffer): { stdout: string; stderr: string
 async function execInContainer(
   containerName: string,
   cmd: string[],
+  timeoutMs = 10000,
 ): Promise<string> {
   const container = docker.getContainer(containerName);
   const exec = await container.exec({
@@ -764,7 +948,7 @@ async function execInContainer(
       }
     });
     stream.on("error", reject);
-    setTimeout(() => reject(new Error("exec timeout")), 10000);
+    setTimeout(() => reject(new Error("exec timeout")), timeoutMs).unref();
   });
 }
 

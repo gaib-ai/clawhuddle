@@ -205,3 +205,90 @@ describe('mergeOpenClawConfig meta handling', () => {
     expect(merged.meta).toEqual({ lastTouchedVersion: '2026.2.17' });
   });
 });
+
+describe('turn pipeline, DM session and secret-store defaults (2026-11-02)', () => {
+  it('collects Slack bursts for 3 s, scopes DM sessions per peer and turns the egress proxy on', () => {
+    const cfg = generateOpenClawConfig(base);
+    expect(cfg.messages).toEqual({
+      inbound: { byChannel: { slack: 3000 } },
+      queue: { mode: 'collect', debounceMsByChannel: { slack: 3000 } },
+    });
+    expect(cfg.session).toEqual({ dmScope: 'per-channel-peer' });
+    expect(cfg.secrets).toEqual({ egressProxy: { enabled: true } });
+  });
+
+  it('overlays those defaults without dropping what the member keeps in the same blocks', () => {
+    const existing = {
+      ...(generateOpenClawConfig(base) as unknown as Record<string, unknown>),
+      messages: {
+        groupChat: { mentionPatterns: ['@Kony2'] },
+        queue: { mode: 'steer', debounceMsByChannel: { telegram: 500 } },
+      },
+      session: { dmScope: 'main', maintenance: { mode: 'warn' } },
+      secrets: { egressProxy: { enabled: false, allowedHosts: ['api.notion.com'] }, providers: { vault: {} } },
+    };
+    const merged = mergeOpenClawConfig(existing, base) as unknown as Record<string, any>;
+    expect(merged.messages).toEqual({
+      groupChat: { mentionPatterns: ['@Kony2'] },
+      inbound: { byChannel: { slack: 3000 } },
+      queue: { mode: 'collect', debounceMsByChannel: { telegram: 500, slack: 3000 } },
+    });
+    expect(merged.session).toEqual({ dmScope: 'per-channel-peer', maintenance: { mode: 'warn' } });
+    expect(merged.secrets).toEqual({
+      egressProxy: { enabled: true, allowedHosts: ['api.notion.com'] },
+      providers: { vault: {} },
+    });
+  });
+
+  it('adds the blocks to a config that never had them', () => {
+    const existing = generateOpenClawConfig(base) as unknown as Record<string, unknown>;
+    delete existing.messages; delete existing.session; delete existing.secrets;
+    const merged = mergeOpenClawConfig(existing, base);
+    expect(merged.messages?.queue?.mode).toBe('collect');
+    expect(merged.session?.dmScope).toBe('per-channel-peer');
+    expect(merged.secrets?.egressProxy?.enabled).toBe(true);
+  });
+});
+
+describe('secret-store providers (Notion)', () => {
+  it('never treats a secret-kind key as a model provider', () => {
+    const cfg = generateOpenClawConfig({ ...base, activeProviderIds: ['google', 'notion'] });
+    expect(Object.keys(cfg.agents!.defaults.models).some((m) => m.startsWith('notion'))).toBe(false);
+    expect(cfg.skills).toBeUndefined();
+  });
+
+  it('points the bundled skill at the store entry once the entry is known to exist', () => {
+    const cfg = generateOpenClawConfig({ ...base, secretRefs: [{ skill: 'notion', name: 'NOTION_API_TOKEN' }] });
+    expect(cfg.skills).toEqual({
+      entries: { notion: { apiKey: { source: 'store', provider: 'default', id: 'NOTION_API_TOKEN' } } },
+    });
+  });
+
+  it('overlays the ref onto the member\'s skills block and keeps their other skill settings', () => {
+    const existing = {
+      ...(generateOpenClawConfig(base) as unknown as Record<string, unknown>),
+      skills: { entries: { notion: { enabled: true, env: { X: '1' } }, searxng: { enabled: false } }, load: { watch: true } },
+    };
+    const merged = mergeOpenClawConfig(existing, { ...base, secretRefs: [{ skill: 'notion', name: 'NOTION_API_TOKEN' }] }) as unknown as Record<string, any>;
+    expect(merged.skills).toEqual({
+      entries: {
+        notion: { enabled: true, env: { X: '1' }, apiKey: { source: 'store', provider: 'default', id: 'NOTION_API_TOKEN' } },
+        searxng: { enabled: false },
+      },
+      load: { watch: true },
+    });
+  });
+
+  it('leaves an existing store ref alone when the store state is unknown, and drops it once the entry is known to be gone', () => {
+    const withRef = {
+      ...(generateOpenClawConfig(base) as unknown as Record<string, unknown>),
+      skills: { entries: { notion: { apiKey: { source: 'store', provider: 'default', id: 'NOTION_API_TOKEN' } }, other: { apiKey: { source: 'store', provider: 'default', id: 'MY_OWN' } } } },
+    };
+    const unknown = mergeOpenClawConfig(withRef, base) as unknown as Record<string, any>;
+    expect(unknown.skills.entries.notion.apiKey.id).toBe('NOTION_API_TOKEN');
+    const known = mergeOpenClawConfig(withRef, { ...base, secretRefs: [] }) as unknown as Record<string, any>;
+    expect(known.skills.entries.notion.apiKey).toBeUndefined();
+    expect(known.skills.entries.other.apiKey.id).toBe('MY_OWN'); // not a platform-managed name
+  });
+});
+

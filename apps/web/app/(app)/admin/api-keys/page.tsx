@@ -6,8 +6,9 @@ import { useOrg } from '@/lib/org-context';
 import { useToast } from '@/components/ui/toast';
 import { apiFetch } from '@/lib/api';
 import { useSession } from 'next-auth/react';
-import { PROVIDERS } from '@clawhuddle/shared';
+import { PROVIDERS, MODEL_PROVIDERS } from '@clawhuddle/shared';
 import { ApiKeyForm, type ApiKeyDisplay } from '@/components/admin/api-key-form';
+import { useSecretStatus } from '@/lib/use-secret-status';
 
 export default function ApiKeysPage() {
   const { orgFetch, ready } = useOrgFetch();
@@ -19,6 +20,7 @@ export default function ApiKeysPage() {
   const [loading, setLoading] = useState(true);
   const [savingPrimary, setSavingPrimary] = useState(false);
   const [savingMax, setSavingMax] = useState(false);
+  const { secretStatus, reloadSecretStatus } = useSecretStatus(orgFetch, '/api-keys/secret-status');
 
   useEffect(() => {
     if (!orgFetch) return;
@@ -126,7 +128,7 @@ export default function ApiKeysPage() {
           }}
         >
           <option value="">No pin (alphabetical order)</option>
-          {PROVIDERS.map((p) => {
+          {MODEL_PROVIDERS.map((p) => {
             const hasOrgKey = providersWithOrgKey.has(p.id);
             return (
               <option key={p.id} value={p.id}>
@@ -198,7 +200,7 @@ export default function ApiKeysPage() {
         />
       </div>
 
-      <ApiKeyForm initialKeys={keys} fetchFn={orgFetch!} scope="org" />
+      <ApiKeyForm initialKeys={keys} fetchFn={orgFetch!} scope="org" secretStatus={secretStatus} onMutate={reloadSecretStatus} />
     </div>
   );
 }

@@ -89,6 +89,10 @@ API keys are stored in `api_keys` table (org-scoped), written to `auth-profiles.
 
 **Primary model.** `agents.defaults.model.primary` is resolved per instance by `getPrimaryPin` in `services/gateway-store.ts`, most specific first: `gateways.primary_model` (Home card picks a model by name, provider implied via `providerForModel`) → `gateways.primary_provider` (older pin) → `org_members.primary_provider` (My API Keys) → `organizations.primary_provider` + `organizations.primary_model` (Admin → API Keys: provider select plus a model select limited to that provider; changing the provider clears the model). A model pin only counts when the member has a key for its provider; otherwise the generator falls back to the provider pin, then to `DEFAULT_PRIMARY`. The provider pick-lists in `PROVIDERS[].models` are deliberately short (Google: Flash 3.8 + Argon 4; Token Kiosk: GPT-5.5 + Claude Sonnet latest + MiniMax M3.1 Flash); the generator still declares the previously offered kiosk models so old pins keep resolving.
 
+## Secret-store providers (Notion)
+
+A provider with `kind: 'secret'` in `PROVIDERS` (today: `notion`, entry `NOTION_API_TOKEN`, host `api.notion.com`, skill `notion`) is a non-LLM credential. Its key uses the normal org/personal key plumbing but never reaches auth-profiles.json and is never a primary-provider candidate (`MODEL_PROVIDERS`). `ensureGatewaySecrets` in `services/gateway.ts` writes it into the running instance's OpenClaw secret store (`openclaw secrets store set … --allow-host …` exec'd in the container, value passed through a transient 0600 file in the data dir, then `secrets reload`) and records what it set in `<gatewayDir>/.clawhuddle-secrets.json`. Only then does the generator emit `skills.entries.<skill>.apiKey = {source:'store', id}` — OpenClaw refuses to start or reload on an unresolved store ref, so the ref follows the state file. It runs after deploy/restart (`scheduleSecretSync`), on status promotion to running, and on key changes. A same-named entry the member created themselves (no record of ours) is left untouched.
+
 ## Config Generation
 
 `apps/api/src/services/openclaw-config.ts`:
@@ -96,6 +100,10 @@ API keys are stored in `api_keys` table (org-scoped), written to `auth-profiles.
 - `mergeOpenClawConfig()` — updates platform-managed fields while preserving user customizations
 
 Platform-managed fields: `meta`, `gateway.*`, `models.providers.*` (custom providers), `agents.defaults`, `channels`, `plugins`.
+
+Three more blocks are platform defaults since 2026-11-02 and are overlaid key by key (`overlayBlock`), so whatever else a member keeps in them survives a redeploy: `messages` (Slack inbound quiet window 3 s, queue mode `collect`, Slack debounce 3 s — short bursts become one turn), `session.dmScope = per-channel-peer` (one DM session per Slack peer), and `secrets.egressProxy.enabled = true` (secret-store entries reach exec as sentinels, swapped in only on hosts bound with `openclaw secrets store set NAME --allow-host <host>`; HTTPS to other hosts is unrestricted unless the member sets `allowedHosts`; plain `http://` to non-loopback hosts is refused).
+
+The API Keys pages show where each instance stands: `GET /api/orgs/:orgId/api-keys/secret-status` (admin) and `/me/api-keys/secret-status` (own instances) return one `SecretStatusEntry` per gateway with `secrets.<provider>` = `injected` (our fingerprint is in the state file) / `pending` (key exists, store not written yet; done once the instance is running) / `member` (state file records `null`: the member's own entry, never overwritten) / `none`. Computed by `secretStatusFor` in `services/gateway.ts`; the web hook `lib/use-secret-status.ts` repolls every 10 s while a running instance is `pending`.
 
 ## Build & Run
 

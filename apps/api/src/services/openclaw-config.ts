@@ -89,6 +89,30 @@ const SLACK_REPLY_TO_MODE: Record<'direct' | 'group' | 'channel', SlackReplyToMo
 };
 
 /**
+ * Platform defaults for the turn pipeline, the DM session model and the secret
+ * store. Tried on the tools gateway first (2026-10-23 to 2026-11-02), default
+ * since 2026-11-02. mergeOpenClawConfig overlays each one key by key, so what
+ * else a member keeps in the same block (`messages.groupChat.mentionPatterns`,
+ * `secrets.egressProxy.allowedHosts`) stays theirs.
+ */
+const MESSAGES_DEFAULTS: NonNullable<OpenClawConfig['messages']> = {
+  // Slack has no inbound quiet window of its own (Telegram: 300 ms), so every
+  // short message started a turn and the next ones were steered into it.
+  // Collect a burst for 3 s and answer it as one turn.
+  inbound: { byChannel: { slack: 3000 } },
+  queue: { mode: 'collect', debounceMsByChannel: { slack: 3000 } },
+};
+/** Each Slack peer gets its own DM session instead of one shared main session. */
+const SESSION_DEFAULTS: NonNullable<OpenClawConfig['session']> = { dmScope: 'per-channel-peer' };
+/**
+ * Secret-store entries reach Gateway-hosted exec as sentinels; the egress proxy
+ * swaps in the real value only on hosts bound with
+ * `openclaw secrets store set NAME --allow-host <host>`. Without `allowedHosts`
+ * HTTPS itself is unrestricted. Plain http:// to a non-loopback host is refused.
+ */
+const SECRETS_DEFAULTS: NonNullable<OpenClawConfig['secrets']> = { egressProxy: { enabled: true } };
+
+/**
  * Who may reach a member's agent over Slack. The agent has a shell and the
  * member's credentials, so it must not take turns from anyone in the workspace
  * (Slack Connect guests included) or from other bots. These are OpenClaw's own
@@ -228,6 +252,17 @@ export interface OpenClawConfig {
     replyToModeByChatType?: Partial<Record<'direct' | 'group' | 'channel', SlackReplyToMode>>;
     dm?: { enabled: boolean; policy?: string };
   }>;
+  /** Turn pipeline: inbound quiet windows and the queue mode (docs/concepts/messages.md, queue.md). */
+  messages?: {
+    inbound?: { byChannel?: Record<string, number> };
+    queue?: { mode?: 'steer' | 'followup' | 'collect' | 'steer-backlog' | 'interrupt' | 'queue'; debounceMsByChannel?: Record<string, number> };
+  };
+  session?: { dmScope?: 'main' | 'per-peer' | 'per-channel-peer' | 'per-account-channel-peer' };
+  /** Bundled-skill settings; the platform only writes `apiKey` store refs, members own the rest. */
+  skills?: {
+    entries?: Record<string, { enabled?: boolean; apiKey?: { source: 'store'; provider: string; id: string } }>;
+  };
+  secrets?: { egressProxy?: { enabled: boolean; allowedHosts?: string[]; bypassHosts?: string[] } };
   plugins: {
     entries: Record<string, { enabled: boolean }>;
   };
@@ -261,6 +296,13 @@ export function generateOpenClawConfig(options: {
    * otherwise ignored, so an instance never ends up on a model it cannot reach.
    */
   primaryModel?: string;
+  /**
+   * Secret-store entries that are PRESENT in this instance's store, with the
+   * bundled skill to point at each. Only present ones: OpenClaw refuses to
+   * start or reload on a store ref it cannot resolve, so the ref is written
+   * once the entry is in (see ensureGatewaySecrets in gateway.ts).
+   */
+  secretRefs?: { skill: string; name: string }[];
 }): OpenClawConfig {
   const { port, token } = options;
   const channels = options.enabledChannels ?? CHANNEL_PLUGINS;
@@ -413,7 +455,7 @@ export function generateOpenClawConfig(options: {
 
   const activeProviders = (options.activeProviderIds ?? [])
     .map((id) => PROVIDERS.find((p) => p.id === id))
-    .filter(Boolean) as typeof PROVIDERS;
+    .filter((p) => p && p.kind !== 'secret') as typeof PROVIDERS;
 
   // A pinned model names its provider through the catalog; it only counts when
   // that provider is active for this member, else fall through to the provider pin.
@@ -467,6 +509,18 @@ export function generateOpenClawConfig(options: {
     },
     list: [{ id: 'main', default: true, reasoningDefault: 'off' }],
   };
+
+  if (options.secretRefs?.length) {
+    const entries: NonNullable<NonNullable<OpenClawConfig['skills']>['entries']> = {};
+    for (const { skill, name } of options.secretRefs) {
+      entries[skill] = { apiKey: { source: 'store', provider: 'default', id: name } };
+    }
+    config.skills = { entries };
+  }
+
+  config.messages = JSON.parse(JSON.stringify(MESSAGES_DEFAULTS));
+  config.session = JSON.parse(JSON.stringify(SESSION_DEFAULTS));
+  config.secrets = JSON.parse(JSON.stringify(SECRETS_DEFAULTS));
 
   // Configure channel tokens (e.g. Telegram bot token)
   const ct = options.channelTokens;
@@ -595,6 +649,24 @@ export function mergeOpenClawConfig(
     lockDownLegacyOpenSlack(slack as Record<string, unknown>);
   }
 
+  // Platform defaults for the turn pipeline, DM sessions and the secret store
+  // ride on top of whatever else the member keeps in those blocks.
+  overlayBlock(merged, 'messages', generated.messages);
+  overlayBlock(merged, 'session', generated.session);
+  overlayBlock(merged, 'secrets', generated.secrets);
+  // Skill store refs: only the apiKey leaf of the named skills is ours; a ref
+  // we no longer emit (entry gone from the store) is removed so the gateway
+  // does not fail its next reload on it.
+  overlayBlock(merged, 'skills', generated.skills);
+  if (options.secretRefs) {
+    const managedNames = new Set(PROVIDERS.flatMap((p) => (p.secret ? [p.secret.name] : [])));
+    const skillEntries = ((merged.skills as Record<string, unknown> | undefined)?.entries ?? {}) as Record<string, Record<string, unknown>>;
+    for (const [skill, entry] of Object.entries(skillEntries)) {
+      const ref = entry?.apiKey as { source?: string; id?: string } | undefined;
+      if (ref?.source === 'store' && ref.id && managedNames.has(ref.id) && !generated.skills?.entries?.[skill]) delete entry.apiKey;
+    }
+  }
+
   // Plugins: merge entries so user-added plugins (e.g. openai, anthropic)
   // are preserved. For platform-managed entries, shallow-merge so any extra
   // fields the user added on the same entry are kept.
@@ -610,4 +682,23 @@ export function mergeOpenClawConfig(
   }
 
   return merged as unknown as OpenClawConfig;
+}
+
+/** Writes every leaf of `managed` into `target[key]`, keeping the member's other keys at each level. */
+function overlayBlock(target: Record<string, unknown>, key: string, managed: unknown): void {
+  if (!managed || typeof managed !== 'object' || Array.isArray(managed)) return;
+  const current = target[key];
+  const base = current && typeof current === 'object' && !Array.isArray(current) ? (current as Record<string, unknown>) : {};
+  target[key] = deepOverlay(base, managed as Record<string, unknown>);
+}
+
+function deepOverlay(base: Record<string, unknown>, managed: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...base };
+  for (const [k, v] of Object.entries(managed)) {
+    const cur = out[k];
+    const bothObjects =
+      v && typeof v === 'object' && !Array.isArray(v) && cur && typeof cur === 'object' && !Array.isArray(cur);
+    out[k] = bothObjects ? deepOverlay(cur as Record<string, unknown>, v as Record<string, unknown>) : v;
+  }
+  return out;
 }

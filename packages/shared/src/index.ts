@@ -272,6 +272,15 @@ export interface ProviderConfig {
    * (e.g. claw-proxy: shared bearer / cost tracking).
    */
   personalOverridable?: boolean;
+  /**
+   * `model` (default): an LLM provider whose key becomes an auth profile or a
+   * custom provider block. `secret`: a non-LLM credential that goes into the
+   * instance's OpenClaw secret store instead (see `secret`), never into
+   * auth-profiles.json, and is never a primary-provider candidate.
+   */
+  kind?: 'model' | 'secret';
+  /** For `kind: 'secret'`: the store entry the key is written to, the HTTPS hosts the egress proxy may substitute it on, and the bundled skill that reads it. */
+  secret?: { name: string; allowedHosts: string[]; skill?: string };
 }
 
 // Order matters: this is the display order of provider cards in the UI.
@@ -349,9 +358,42 @@ export const PROVIDERS: ProviderConfig[] = [
   // runtime knows come from the Codex CLI it bundles.
   { id: 'openai-codex', label: 'OpenAI Codex', envVar: '', placeholder: '', defaultModel: 'openai/gpt-5.6-terra', agentRuntime: 'codex', models: [{ id: 'openai/gpt-5.6-terra', label: 'GPT-5.6 Terra' }, { id: 'openai/gpt-5.6-sol', label: 'GPT-5.6 Sol' }, { id: 'openai/gpt-5.6-luna', label: 'GPT-5.6 Luna' }, { id: 'openai/gpt-5.5', label: 'GPT-5.5' }], supportsOAuth: true, oauthInstructions: 'Run `codex` and sign in with your ChatGPT account, then run `cat ~/.codex/auth.json` and paste the JSON here.' },
   { id: 'openrouter', label: 'OpenRouter', envVar: 'OPENROUTER_API_KEY', placeholder: 'sk-or-...', defaultModel: 'openrouter/anthropic/claude-sonnet-4.5' },
+  // Not an LLM: the token lands in each instance's OpenClaw secret store
+  // (entry NOTION_API_TOKEN, substituted by the egress proxy on api.notion.com
+  // only) and the bundled `notion` skill is pointed at it. Exec sees the token
+  // as `$NOTION_API_TOKEN`, a sentinel that only becomes the real value on the
+  // wire to api.notion.com.
+  {
+    id: 'notion', label: 'Notion', envVar: 'NOTION_API_TOKEN', placeholder: 'ntn_...', defaultModel: '',
+    kind: 'secret',
+    secret: { name: 'NOTION_API_TOKEN', allowedHosts: ['api.notion.com'], skill: 'notion' },
+  },
 ];
 
+/**
+ * Where a secret-kind provider's key stands on one instance, as reported by
+ * GET …/api-keys/secret-status: `injected` = the key we hold is in the
+ * instance's OpenClaw secret store; `pending` = a key exists but is not in the
+ * store yet (injected once the instance is running); `member` = the member put
+ * their own entry under that name and we leave it alone; `none` = no key.
+ */
+export type SecretInjectionState = 'injected' | 'pending' | 'member' | 'none';
+
+export interface SecretStatusEntry {
+  gateway_id: string;
+  slot: number;
+  label: string | null;
+  status: string | null;
+  email?: string;
+  name?: string | null;
+  /** keyed by provider id (e.g. `notion`) */
+  secrets: Record<string, SecretInjectionState>;
+}
+
 export const PROVIDER_IDS = PROVIDERS.map((p) => p.id);
+
+/** Providers that serve models (primary-provider candidates); excludes `kind: 'secret'`. */
+export const MODEL_PROVIDERS = PROVIDERS.filter((p) => p.kind !== 'secret');
 
 /** Every pickable model ref across providers, in display order. */
 export const MODEL_IDS = PROVIDERS.flatMap((p) => (p.models ?? []).map((m) => m.id));

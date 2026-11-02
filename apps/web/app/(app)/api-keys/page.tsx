@@ -3,8 +3,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useOrgFetch } from '@/lib/use-org-fetch';
 import { useToast } from '@/components/ui/toast';
-import { PROVIDERS } from '@clawhuddle/shared';
+import { PROVIDERS, MODEL_PROVIDERS } from '@clawhuddle/shared';
 import { ApiKeyForm, type ApiKeyDisplay, type ProviderSummary } from '@/components/admin/api-key-form';
+import { useSecretStatus } from '@/lib/use-secret-status';
 
 export default function MyApiKeysPage() {
   const { orgFetch, ready } = useOrgFetch();
@@ -15,16 +16,18 @@ export default function MyApiKeysPage() {
   const [myPrimary, setMyPrimary] = useState<string>('');
   const [orgPrimary, setOrgPrimary] = useState<string | null>(null);
   const [savingPrimary, setSavingPrimary] = useState(false);
+  const { secretStatus, reloadSecretStatus } = useSecretStatus(orgFetch, '/me/api-keys/secret-status');
 
   const loadSummary = useCallback(async () => {
     if (!orgFetch) return;
+    void reloadSecretStatus();
     try {
       const res = await orgFetch<{ data: ProviderSummary[] }>('/me/api-keys/summary');
       setSummary(res.data);
     } catch {
       // non-fatal — UI will fall back to deriving source from keys list
     }
-  }, [orgFetch]);
+  }, [orgFetch, reloadSecretStatus]);
 
   useEffect(() => {
     if (!orgFetch) return;
@@ -113,7 +116,7 @@ export default function MyApiKeysPage() {
           <option value="">
             Org default{orgPrimary ? ` (${PROVIDERS.find((p) => p.id === orgPrimary)?.label ?? orgPrimary})` : ' (no pin)'}
           </option>
-          {PROVIDERS.map((p) => {
+          {MODEL_PROVIDERS.map((p) => {
             const hasKey = summary.some((s) => s.provider === p.id && s.source !== 'none');
             return (
               <option key={p.id} value={p.id}>
@@ -131,6 +134,7 @@ export default function MyApiKeysPage() {
         summary={summary}
         fetchFn={orgFetch!}
         onMutate={loadSummary}
+        secretStatus={secretStatus}
       />
     </div>
   );
