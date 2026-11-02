@@ -3,7 +3,9 @@ import { getDb } from '../../db/index.js';
 import { v4 as uuid } from 'uuid';
 import { requireRole } from '../../middleware/auth.js';
 import { PROVIDERS, PROVIDER_IDS, type SetApiKeyRequest, type CredentialType } from '@clawhuddle/shared';
-import { syncAuthProfiles, syncAuthProfilesForUser } from '../../services/gateway.js';
+import { syncAuthProfiles, syncAuthProfilesForUser, secretStatusFor } from '../../services/gateway.js';
+import { listMemberGateways, listOrgGateways, type GatewayRow } from '../../services/gateway-store.js';
+import type { SecretStatusEntry } from '@clawhuddle/shared';
 
 // WARNING: base64 is NOT real encryption — it only obscures keys in the DB.
 // For production, replace with AES-GCM using an ENCRYPTION_KEY env variable.
@@ -254,6 +256,33 @@ export async function orgApiKeyRoutes(app: FastifyInstance) {
     { preHandler: [requireRole('owner', 'admin'), resolveTargetMember] },
   );
 
+  // Where each secret-kind key (Notion) stands on every instance in the org:
+  // in the store, waiting for the instance, the member's own entry, or no key.
+  app.get(
+    '/api/orgs/:orgId/api-keys/secret-status',
+    { preHandler: requireRole('owner', 'admin') },
+    async (request) => {
+      const orgId = request.orgId!;
+      const users = new Map(
+        (getDb()
+          .prepare('SELECT om.id AS member_id, u.email, u.name FROM org_members om JOIN users u ON u.id = om.user_id WHERE om.org_id = ?')
+          .all(orgId) as { member_id: string; email: string; name: string | null }[]).map((u) => [u.member_id, u]),
+      );
+      return {
+        data: listOrgGateways(orgId).map((g) => ({
+          ...secretStatusEntry(g),
+          email: users.get(g.member_id)?.email,
+          name: users.get(g.member_id)?.name ?? null,
+        })),
+      };
+    },
+  );
+
+  // Same for the current member's own instances.
+  app.get('/api/orgs/:orgId/me/api-keys/secret-status', async (request) => {
+    return { data: listMemberGateways(request.orgMember!.id).map(secretStatusEntry) };
+  });
+
   // Provider source summary for a specific member (admin view).
   app.get(
     '/api/orgs/:orgId/members/:memberId/api-keys/summary',
@@ -374,4 +403,8 @@ export function getResolvedApiKeysForMember(orgId: string, userId: string): Reso
 export function getResolvedApiKey(orgId: string, userId: string, provider: string): string | null {
   const resolved = getResolvedApiKeysForMember(orgId, userId).filter((k) => k.provider === provider);
   return resolved[0]?.key ?? null;
+}
+
+function secretStatusEntry(g: GatewayRow): SecretStatusEntry {
+  return { gateway_id: g.id, slot: g.slot, label: g.label, status: g.status, secrets: secretStatusFor(g) };
 }

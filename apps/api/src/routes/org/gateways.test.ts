@@ -110,6 +110,7 @@ beforeAll(async () => {
   const { orgPlugin } = await import('../../middleware/auth.js');
   const { orgMemberRoutes } = await import('./members.js');
   const { orgGatewayRoutes } = await import('./gateways.js');
+  const { orgApiKeyRoutes } = await import('./api-keys.js');
   app = Fastify();
   await app.register(authRoutes);
   await app.register(orgRoutes);
@@ -117,6 +118,7 @@ beforeAll(async () => {
     await instance.register(orgPlugin);
     await instance.register(orgMemberRoutes);
     await instance.register(orgGatewayRoutes);
+    await instance.register(orgApiKeyRoutes);
   });
   await app.ready();
 });
@@ -448,5 +450,52 @@ describe('device pairing', () => {
     const approve = await app.inject({ method: 'POST', url: `/api/orgs/${ORG}/gateways/${membersInstance}/devices/${PENDING.requestId}/approve`, headers: await as(MEMBER) });
     expect(approve.statusCode).toBe(400);
     getDb().prepare("UPDATE gateways SET status = 'running' WHERE id = ?").run(membersInstance);
+  });
+});
+
+describe('secret-store status (Notion)', () => {
+  // MEMBER still owns slot 1 here; OTHER was removed above.
+  const stateFile = () => path.join(tmpDir, 'data', 'gateways', ORG, MEMBER.id, '.clawhuddle-secrets.json');
+  // The org-wide list has every instance left by the tests above; look at MEMBER's slot 1.
+  const orgStatus = async () => {
+    const data = (await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/api-keys/secret-status`, headers: await as(ADMIN) })).json().data;
+    return [data.find((e: any) => e.email === MEMBER.email && e.slot === 1)];
+  };
+  const myStatus = async () =>
+    (await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/me/api-keys/secret-status`, headers: await as(MEMBER) })).json().data;
+
+  it('reports no key until the org adds one', async () => {
+    const data = await orgStatus();
+    expect(data[0]).toMatchObject({ gateway_id: (await mine(MEMBER)).data[0].id, slot: 1, email: MEMBER.email, secrets: { notion: 'none' } });
+    expect(data[0]).not.toHaveProperty('token');
+  });
+
+  it('is pending once a key exists and the store has not been written', async () => {
+    const res = await app.inject({
+      method: 'POST', url: `/api/orgs/${ORG}/api-keys`, headers: await as(ADMIN),
+      payload: { provider: 'notion', key: 'ntn_test_token', credentialType: 'api_key' },
+    });
+    expect(res.statusCode).toBe(201);
+    expect((await orgStatus())[0].secrets.notion).toBe('pending');
+    expect((await myStatus())[0].secrets.notion).toBe('pending');
+  });
+
+  it('is injected when the recorded fingerprint matches the key, pending when it does not', async () => {
+    const crypto = await import('node:crypto');
+    const fp = crypto.createHash('sha256').update('ntn_test_token').digest('hex').slice(0, 16);
+    fs.writeFileSync(stateFile(), JSON.stringify({ NOTION_API_TOKEN: { fingerprint: fp } }));
+    expect((await orgStatus())[0].secrets.notion).toBe('injected');
+    fs.writeFileSync(stateFile(), JSON.stringify({ NOTION_API_TOKEN: { fingerprint: 'stale' } }));
+    expect((await orgStatus())[0].secrets.notion).toBe('pending');
+  });
+
+  it("marks a member's own entry as theirs whatever the org key", async () => {
+    fs.writeFileSync(stateFile(), JSON.stringify({ NOTION_API_TOKEN: { fingerprint: null } }));
+    expect((await orgStatus())[0].secrets.notion).toBe('member');
+  });
+
+  it('keeps the org-wide list to admins', async () => {
+    const res = await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/api-keys/secret-status`, headers: await as(MEMBER) });
+    expect(res.statusCode).toBe(403);
   });
 });

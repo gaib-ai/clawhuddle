@@ -2,7 +2,8 @@
 
 import { useState } from 'react';
 import { useToast } from '@/components/ui/toast';
-import { PROVIDERS, type CredentialType, type ModelOption } from '@clawhuddle/shared';
+import { PROVIDERS, type CredentialType, type ModelOption, type SecretStatusEntry, type SecretInjectionState } from '@clawhuddle/shared';
+import { gatewayLabel } from '@/lib/gateway-url';
 
 type FetchFn = <T>(path: string, options?: RequestInit) => Promise<T>;
 
@@ -39,6 +40,8 @@ interface Props {
   basePathOverride?: string;
   /** Show providers even when personalOverridable===false (admin path; members can't self-set these). */
   includeRestricted?: boolean;
+  /** Per-instance state of secret-kind keys (from `…/api-keys/secret-status`); rendered on those providers' cards. */
+  secretStatus?: SecretStatusEntry[];
 }
 
 const CRED_TYPE_LABEL: Record<CredentialType, string> = {
@@ -63,6 +66,26 @@ function SourceBadge({ source }: { source: 'user' | 'org' | 'none' }) {
   );
 }
 
+/** Badge for one instance on a secret-kind provider's card. */
+function SecretStateBadge({ state, running }: { state: SecretInjectionState; running: boolean }) {
+  const config = {
+    injected: { label: 'In secret store', bg: 'rgba(34,197,94,0.15)', color: '#22c55e' },
+    pending: running
+      ? { label: 'Injecting…', bg: 'rgba(59,130,246,0.15)', color: '#3b82f6' }
+      : { label: 'Injects on next start', bg: 'var(--bg-tertiary)', color: 'var(--text-tertiary)' },
+    member: { label: 'Member’s own entry', bg: 'var(--bg-tertiary)', color: 'var(--text-secondary)' },
+    none: { label: 'No key', bg: 'rgba(239,68,68,0.12)', color: '#ef4444' },
+  }[state];
+  return (
+    <span
+      className="text-[10px] font-medium px-1.5 py-0.5 rounded whitespace-nowrap"
+      style={{ background: config.bg, color: config.color }}
+    >
+      {config.label}
+    </span>
+  );
+}
+
 function getAvailableTabs(provider: (typeof PROVIDERS)[number]): CredentialType[] {
   // OAuth-only providers (no envVar) only show oauth tab
   if (provider.supportsOAuth && !provider.envVar) return ['oauth'];
@@ -72,7 +95,7 @@ function getAvailableTabs(provider: (typeof PROVIDERS)[number]): CredentialType[
   return tabs;
 }
 
-export function ApiKeyForm({ initialKeys, fetchFn, scope = 'org', summary, onMutate, basePathOverride, includeRestricted }: Props) {
+export function ApiKeyForm({ initialKeys, fetchFn, scope = 'org', summary, onMutate, basePathOverride, includeRestricted, secretStatus }: Props) {
   const { toast } = useToast();
   const isUserScope = scope === 'user';
   // User-scope hits /me/api-keys; org-scope hits /api-keys. Single source of truth.
@@ -199,7 +222,8 @@ export function ApiKeyForm({ initialKeys, fetchFn, scope = 'org', summary, onMut
   return (
     <div className="space-y-6 max-w-lg">
       {visibleProviders.map((providerConfig) => {
-        const { id, label, placeholder, defaultModel, models, supportsSetupToken, setupTokenInstructions, supportsOAuth, oauthInstructions } = providerConfig;
+        const { id, label, placeholder, defaultModel, models, supportsSetupToken, setupTokenInstructions, supportsOAuth, oauthInstructions, secret } = providerConfig;
+        const isSecret = providerConfig.kind === 'secret' && !!secret;
         const tabs = getAvailableTabs(providerConfig);
         const activeTab = credTabs[id] ?? tabs[0];
         const firstExisting = keysForProvider(id)[0];
@@ -225,7 +249,11 @@ export function ApiKeyForm({ initialKeys, fetchFn, scope = 'org', summary, onMut
                 </h3>
                 {isUserScope && <SourceBadge source={source} />}
               </div>
-              {isUserScope ? null : models ? (
+              {isSecret ? (
+                <span className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
+                  Secret store · <code className="font-mono">{secret!.name}</code>
+                </span>
+              ) : isUserScope ? null : models ? (
                 <select
                   value={currentModel}
                   onChange={(e) => {
@@ -257,6 +285,17 @@ export function ApiKeyForm({ initialKeys, fetchFn, scope = 'org', summary, onMut
                 </span>
               )}
             </div>
+
+            {isSecret && (
+              <p className="text-xs mb-3" style={{ color: 'var(--text-tertiary)' }}>
+                Not a model key. The token is written into each instance’s OpenClaw secret store as{' '}
+                <code className="font-mono">{secret!.name}</code> and released only on requests to{' '}
+                {secret!.allowedHosts.join(', ')}; the instance config holds a reference, never the value.
+                Running instances pick it up within a minute, new instances on their first boot.
+                An instance whose member added their own entry under that name keeps it.
+                {isUserScope && !basePathOverride && ' A personal token here replaces the org one on your instances only.'}
+              </p>
+            )}
 
             {(() => {
               const providerKeys = keysForProvider(id);
@@ -354,6 +393,28 @@ export function ApiKeyForm({ initialKeys, fetchFn, scope = 'org', summary, onMut
                 </div>
               );
             })()}
+
+            {isSecret && secretStatus && secretStatus.length > 0 && (
+              <div className="mb-3 rounded-lg overflow-hidden" style={{ border: '1px solid var(--border-subtle)' }}>
+                {secretStatus.map((e, i) => {
+                  const who = e.name || e.email;
+                  return (
+                    <div
+                      key={e.gateway_id}
+                      className="flex items-center justify-between gap-3 px-3 py-1.5 text-xs"
+                      style={{ borderTop: i === 0 ? 'none' : '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
+                    >
+                      <span className="truncate">
+                        {who ? <>{who} · </> : null}
+                        {gatewayLabel(e)}
+                        <span style={{ color: 'var(--text-tertiary)' }}> · {e.status ?? 'not deployed'}</span>
+                      </span>
+                      <SecretStateBadge state={e.secrets[id] ?? 'none'} running={e.status === 'running'} />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
             {isUserScope && source === 'org' && (
               <p className="text-[11px] mb-3" style={{ color: 'var(--text-tertiary)' }}>
