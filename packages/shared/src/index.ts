@@ -277,8 +277,11 @@ export interface ProviderConfig {
    * custom provider block. `secret`: a non-LLM credential that goes into the
    * instance's OpenClaw secret store instead (see `secret`), never into
    * auth-profiles.json, and is never a primary-provider candidate.
+   * `oauth-client`: a Google OAuth client JSON (`client_secret_….json`) that
+   * the platform installs into each instance's gog CLI with
+   * `gog auth credentials set`, so members only have to sign in. Org-level only.
    */
-  kind?: 'model' | 'secret';
+  kind?: 'model' | 'secret' | 'oauth-client';
   /** For `kind: 'secret'`: the store entry the key is written to, the HTTPS hosts the egress proxy may substitute it on, and the bundled skill that reads it. */
   secret?: { name: string; allowedHosts: string[]; skill?: string };
 }
@@ -368,6 +371,14 @@ export const PROVIDERS: ProviderConfig[] = [
     kind: 'secret',
     secret: { name: 'NOTION_API_TOKEN', allowedHosts: ['api.notion.com'], skill: 'notion' },
   },
+  // Not an LLM either: the shared Google OAuth client for the gog CLI (Gmail,
+  // Calendar, Drive, Docs …). Installed into every instance that has no gog
+  // client of its own; each member still signs in with `gog auth add <email>`.
+  {
+    id: 'google-workspace', label: 'Google Workspace (gog OAuth client)', envVar: '',
+    placeholder: '{"installed":{"client_id":"….apps.googleusercontent.com","client_secret":"GOCSPX-…", …}}',
+    defaultModel: '', kind: 'oauth-client', personalOverridable: false,
+  },
 ];
 
 /**
@@ -376,8 +387,10 @@ export const PROVIDERS: ProviderConfig[] = [
  * instance's OpenClaw secret store; `pending` = a key exists but is not in the
  * store yet (injected once the instance is running); `member` = the member put
  * their own entry under that name and we leave it alone; `none` = no key.
+ * `restart` (gog client only): set up at the next restart or redeploy, since
+ * the keyring password it needs is only read when the instance boots.
  */
-export type SecretInjectionState = 'injected' | 'pending' | 'member' | 'none';
+export type SecretInjectionState = 'injected' | 'pending' | 'restart' | 'member' | 'none';
 
 export interface SecretStatusEntry {
   gateway_id: string;
@@ -392,8 +405,24 @@ export interface SecretStatusEntry {
 
 export const PROVIDER_IDS = PROVIDERS.map((p) => p.id);
 
-/** Providers that serve models (primary-provider candidates); excludes `kind: 'secret'`. */
-export const MODEL_PROVIDERS = PROVIDERS.filter((p) => p.kind !== 'secret');
+/** Providers that serve models (primary-provider candidates); excludes non-LLM kinds. */
+export const MODEL_PROVIDERS = PROVIDERS.filter((p) => (p.kind ?? 'model') === 'model');
+
+/**
+ * Parses a Google OAuth client JSON as downloaded from Google Cloud Console
+ * (`{"installed": {...}}` or `{"web": {...}}`); null when it is not one.
+ */
+export function parseGoogleOAuthClient(raw: string): { client_id: string; client_secret: string } | null {
+  try {
+    const j = JSON.parse(raw);
+    const c = j?.installed ?? j?.web ?? j;
+    if (typeof c?.client_id === 'string' && typeof c?.client_secret === 'string'
+      && c.client_id.endsWith('.apps.googleusercontent.com') && c.client_secret.length > 0) {
+      return { client_id: c.client_id, client_secret: c.client_secret };
+    }
+  } catch { /* not JSON */ }
+  return null;
+}
 
 /** Every pickable model ref across providers, in display order. */
 export const MODEL_IDS = PROVIDERS.flatMap((p) => (p.models ?? []).map((m) => m.id));

@@ -2,7 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { getDb } from '../../db/index.js';
 import { v4 as uuid } from 'uuid';
 import { requireRole } from '../../middleware/auth.js';
-import { PROVIDERS, PROVIDER_IDS, type SetApiKeyRequest, type CredentialType } from '@clawhuddle/shared';
+import { PROVIDERS, PROVIDER_IDS, parseGoogleOAuthClient, type SetApiKeyRequest, type CredentialType } from '@clawhuddle/shared';
 import { syncAuthProfiles, syncAuthProfilesForUser, secretStatusFor } from '../../services/gateway.js';
 import { listMemberGateways, listOrgGateways, type GatewayRow } from '../../services/gateway-store.js';
 import type { SecretStatusEntry } from '@clawhuddle/shared';
@@ -18,6 +18,9 @@ function decodeKey(encoded: string): string {
 }
 
 function maskKey(key: string): string {
+  // A Google OAuth client is shown by its client id; the secret stays hidden.
+  const client = parseGoogleOAuthClient(key);
+  if (client) return `client ${client.client_id.split('-')[0]}-…`;
   if (key.length <= 8) return '****';
   return key.slice(0, 4) + '...' + key.slice(-4);
 }
@@ -104,6 +107,12 @@ function registerCrud(
             .status(403)
             .send({ error: 'forbidden', message: `Provider "${provider}" is managed at the organization level only` });
         }
+      }
+      if (PROVIDERS.find((p) => p.id === provider)?.kind === 'oauth-client' && !parseGoogleOAuthClient(key)) {
+        return reply.status(400).send({
+          error: 'validation',
+          message: 'Paste the whole client_secret_….json from Google Cloud Console (needs client_id and client_secret)',
+        });
       }
       const ct: CredentialType =
         credentialType === 'token' ? 'token' : credentialType === 'oauth' ? 'oauth' : 'api_key';

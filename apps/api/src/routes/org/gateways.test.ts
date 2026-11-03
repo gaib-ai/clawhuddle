@@ -20,6 +20,8 @@ const docker = vi.hoisted(() => ({
   execs: [] as string[][],
   /** What `openclaw devices list --json` prints inside the stub container. */
   devicesJson: '{"pending":[],"paired":[]}',
+  /** stdout for `sh -c <script>` execs, picked by a substring of the script. */
+  shOutputs: {} as Record<string, string>,
 }));
 vi.mock('dockerode', () => {
   // A docker exec stream without a TTY is framed: type byte, 3 zero bytes,
@@ -43,9 +45,12 @@ vi.mock('dockerode', () => {
     async exec(opts: { Cmd: string[] }) {
       docker.execs.push(opts.Cmd);
       const isList = opts.Cmd.slice(0, 3).join(' ') === 'openclaw devices list';
+      const sh = opts.Cmd[0] === 'sh'
+        ? Object.entries(docker.shOutputs).find(([k]) => opts.Cmd[2]?.includes(k))?.[1]
+        : undefined;
       const chunks = isList
         ? [frame(2, 'warn: something on stderr\n'), frame(1, docker.devicesJson.slice(0, 10)), frame(1, docker.devicesJson.slice(10))]
-        : [];
+        : sh !== undefined ? [frame(1, sh)] : [];
       return {
         start: async () => ({
           resume() {},
@@ -499,3 +504,186 @@ describe('secret-store status (Notion)', () => {
     expect(res.statusCode).toBe(403);
   });
 });
+
+describe('gog OAuth client (Google Workspace)', () => {
+  const CLIENT = JSON.stringify({
+    installed: { client_id: '123456789012-abc.apps.googleusercontent.com', client_secret: 'GOCSPX-test', redirect_uris: ['http://localhost'] },
+  });
+  const dir = () => path.join(tmpDir, 'data', 'gateways', ORG, MEMBER.id);
+  const gogState = async () => {
+    const data = (await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/api-keys/secret-status`, headers: await as(ADMIN) })).json().data;
+    return data.find((e: any) => e.email === MEMBER.email && e.slot === 1).secrets['google-workspace'];
+  };
+  const envOf = (d: string) => fs.readFileSync(path.join(d, 'env'), 'utf-8');
+
+  it('only takes a real client JSON, and shows it by client id', async () => {
+    const bad = await app.inject({
+      method: 'POST', url: `/api/orgs/${ORG}/api-keys`, headers: await as(ADMIN),
+      payload: { provider: 'google-workspace', key: '{"access_token":"x"}', credentialType: 'api_key' },
+    });
+    expect(bad.statusCode).toBe(400);
+    expect(await gogState()).toBe('none');
+
+    const ok = await app.inject({
+      method: 'POST', url: `/api/orgs/${ORG}/api-keys`, headers: await as(ADMIN),
+      payload: { provider: 'google-workspace', key: CLIENT, credentialType: 'api_key' },
+    });
+    expect(ok.statusCode).toBe(201);
+    expect(ok.json().data.key_masked).toBe('client 123456789012-…');
+    expect(JSON.stringify(ok.json())).not.toContain('GOCSPX');
+  });
+
+  it('is not a personal key a member can set', async () => {
+    const res = await app.inject({
+      method: 'POST', url: `/api/orgs/${ORG}/me/api-keys`, headers: await as(MEMBER),
+      payload: { provider: 'google-workspace', key: CLIENT, credentialType: 'api_key' },
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('waits for a reboot on a running instance that has no keyring env yet', async () => {
+    expect(fs.existsSync(path.join(dir(), 'env'))).toBe(false);
+    expect(await gogState()).toBe('restart');
+  });
+
+  it('writes the keyring env before the instance boots, then installs the client once it is up', async () => {
+    const gw = (await mine(MEMBER)).data[0];
+    const res = await app.inject({ method: 'POST', url: `/api/orgs/${ORG}/gateways/${gw.id}/restart`, headers: await as(MEMBER) });
+    expect(res.statusCode).toBe(200);
+    const env = envOf(dir());
+    expect(env).toMatch(/^GOG_KEYRING_BACKEND=file$/m);
+    expect(env).toMatch(/^GOG_KEYRING_PASSWORD=[0-9a-f]{48}$/m);
+    expect(fs.statSync(path.join(dir(), 'env')).mode & 0o777).toBe(0o600);
+    expect(await gogState()).toBe('pending');
+
+    const { ensureGatewaySecrets } = await import('../../services/gateway.js');
+    const { getGatewayRow } = await import('../../services/gateway-store.js');
+    docker.execs.length = 0;
+    await ensureGatewaySecrets(getGatewayRow(ORG, gw.id));
+    const set = docker.execs.find((c) => c[0] === 'sh' && c[2]?.includes('gog auth credentials set'));
+    expect(set).toEqual(['sh', '-c', expect.stringContaining('. /root/.openclaw/env'), '/root/.openclaw/.clawhuddle-gog-client.tmp.json']);
+    expect(docker.execs.flat().join(' ')).not.toContain('GOCSPX');
+    expect(fs.existsSync(path.join(dir(), '.clawhuddle-gog-client.tmp.json'))).toBe(false);
+    expect(await gogState()).toBe('injected');
+
+    // Nothing to do the second time; the password is never regenerated.
+    docker.execs.length = 0;
+    await ensureGatewaySecrets(getGatewayRow(ORG, gw.id));
+    expect(docker.execs.some((c) => c[0] === 'sh')).toBe(false);
+    await app.inject({ method: 'POST', url: `/api/orgs/${ORG}/gateways/${gw.id}/restart`, headers: await as(MEMBER) });
+    expect(envOf(dir())).toBe(env);
+  });
+
+  it("leaves a member's own gog client alone", async () => {
+    fs.rmSync(path.join(dir(), '.clawhuddle-gog.json'));
+    fs.rmSync(path.join(dir(), 'env'));
+    fs.mkdirSync(path.join(dir(), 'gog', 'data'), { recursive: true });
+    fs.writeFileSync(path.join(dir(), 'gog', 'data', 'credentials.json'), '{"client_id":"theirs"}');
+    expect(await gogState()).toBe('member');
+
+    const gw = (await mine(MEMBER)).data[0];
+    await app.inject({ method: 'POST', url: `/api/orgs/${ORG}/gateways/${gw.id}/restart`, headers: await as(MEMBER) });
+    expect(fs.existsSync(path.join(dir(), 'env'))).toBe(false);
+    const { ensureGatewaySecrets } = await import('../../services/gateway.js');
+    const { getGatewayRow } = await import('../../services/gateway-store.js');
+    docker.execs.length = 0;
+    await ensureGatewaySecrets(getGatewayRow(ORG, gw.id));
+    expect(docker.execs.some((c) => c[0] === 'sh')).toBe(false);
+  });
+
+  it("appends to an env file the member already has, keeping their lines", async () => {
+    const { ensureGogEnv } = await import('../../services/gateway.js');
+    const ownerDir = path.join(tmpDir, 'data', 'gateways', ORG, OWNER.id);
+    fs.mkdirSync(ownerDir, { recursive: true });
+    fs.writeFileSync(path.join(ownerDir, 'env'), 'PM2_HOME=/root/.openclaw/pm2\nGOG_KEYRING_BACKEND=file');
+    ensureGogEnv({ org_id: ORG, user_id: OWNER.id, slot: 1 });
+    const lines = envOf(ownerDir).trimEnd().split('\n');
+    expect(lines[0]).toBe('PM2_HOME=/root/.openclaw/pm2');
+    expect(lines[1]).toBe('GOG_KEYRING_BACKEND=file');
+    expect(lines[2]).toMatch(/^GOG_KEYRING_PASSWORD=[0-9a-f]{48}$/);
+    expect(lines).toHaveLength(3);
+  });
+});
+
+describe('Google sign-in from the Home card', () => {
+  const dir = () => path.join(tmpDir, 'data', 'gateways', ORG, MEMBER.id);
+  let gwId: string;
+  let startScript = '';
+  const call = async (user: { id: string }, method: 'GET' | 'POST' | 'DELETE', suffix: string, payload?: object) =>
+    app.inject({ method, url: `/api/orgs/${ORG}/gateways/${gwId}/google${suffix}`, headers: await as(user), ...(payload ? { payload } : {}) });
+
+  beforeAll(async () => {
+    gwId = (await mine(MEMBER)).data[0].id;
+    const { setGatewayState } = await import('../../services/gateway-store.js');
+    setGatewayState(gwId, { status: 'running' });
+    docker.shOutputs = {
+      'gog auth list': JSON.stringify({ accounts: [{ email: 'member@example.com', subject: '1', services: ['gmail', 'drive'], scopes: ['x'] }] }),
+      'gog auth add': 'Google sign-in requires a Google Account\n{"auth_url":"https://accounts.google.com/o/oauth2/auth?client_id=x&state=y","state_reused":false}',
+      'gog auth remove': '',
+    };
+  });
+
+  it("refuses a sign-in while the member's own gog setup has no keyring password", async () => {
+    // Left by the previous block: credentials.json of the member's own, no env file.
+    expect((await call(MEMBER, 'GET', '')).json().data).toEqual({ readiness: 'keyring', accounts: [] });
+    expect((await call(MEMBER, 'POST', '/start', { email: 'member@example.com' })).statusCode).toBe(400);
+  });
+
+  it('lists the connected accounts, to admins too, without scopes or tokens', async () => {
+    fs.writeFileSync(path.join(dir(), 'env'), 'GOG_KEYRING_BACKEND=file\nGOG_KEYRING_PASSWORD=abc\n', { mode: 0o600 });
+    const res = await call(MEMBER, 'GET', '');
+    expect(res.json().data).toEqual({ readiness: 'ready', accounts: [{ email: 'member@example.com', services: ['gmail', 'drive'] }] });
+    expect((await call(ADMIN, 'GET', '')).statusCode).toBe(200);
+  });
+
+  it("keeps everyone else from connecting or removing an account on someone's instance", async () => {
+    expect((await call(ADMIN, 'POST', '/start', { email: 'admin@example.com' })).statusCode).toBe(403);
+    expect((await call(OWNER, 'POST', '/finish', { email: 'owner@example.com', url: 'http://127.0.0.1:1/oauth2/callback?code=c&state=s' })).statusCode).toBe(403);
+    expect((await call(ADMIN, 'DELETE', '/accounts/member%40example.com')).statusCode).toBe(403);
+  });
+
+  it('starts the sign-in with the email as its own argument and returns the Google link', async () => {
+    expect((await call(MEMBER, 'POST', '/start', { email: 'x; rm -rf /' })).statusCode).toBe(400);
+    docker.execs.length = 0;
+    const res = await call(MEMBER, 'POST', '/start', { email: 'member@example.com' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.authUrl).toMatch(/^https:\/\/accounts\.google\.com\//);
+    const cmd = docker.execs.find((c) => c[2]?.includes('--step=1'))!;
+    expect(cmd.slice(3)).toEqual(['member@example.com', 'gmail,calendar,drive,docs,sheets,slides']);
+    startScript = cmd[2];
+    expect(cmd[2]).toContain('. /root/.openclaw/env');
+  });
+
+  it('finishes only with the loopback address Google redirected to, passed through a file', async () => {
+    for (const url of ['https://evil.example/?code=c&state=s', 'http://127.0.0.1:4242/oauth2/callback', 'not a url']) {
+      expect((await call(MEMBER, 'POST', '/finish', { email: 'member@example.com', url })).statusCode).toBe(400);
+    }
+    docker.execs.length = 0;
+    const url = 'http://127.0.0.1:42279/oauth2/callback?state=s123&code=4%2Fsecret-code&scope=email';
+    const res = await call(MEMBER, 'POST', '/finish', { email: 'member@example.com', url });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.readiness).toBe('ready');
+    const cmd = docker.execs.find((c) => c[2]?.includes('--step=2'))!;
+    expect(cmd.slice(3)).toEqual(['member@example.com', 'gmail,calendar,drive,docs,sheets,slides', '/root/.openclaw/.clawhuddle-google-redirect.tmp']);
+    // Step 2 must repeat step 1's flags, or gog refuses it as a state mismatch.
+    const flags = (c: string) => c.replace(/--step=\d|--auth-url "\$\(cat "\$2"\)"/g, '').replace(/\s+/g, ' ').trim();
+    expect(flags(cmd[2])).toBe(flags(startScript));
+    expect(docker.execs.flat().join(' ')).not.toContain('secret-code');
+    expect(fs.existsSync(path.join(dir(), '.clawhuddle-google-redirect.tmp'))).toBe(false);
+  });
+
+  it('disconnects an account', async () => {
+    docker.execs.length = 0;
+    const res = await call(MEMBER, 'DELETE', '/accounts/member%40example.com');
+    expect(res.statusCode).toBe(200);
+    expect(docker.execs.find((c) => c[2]?.includes('gog auth remove'))!.slice(3)).toEqual(['member@example.com']);
+  });
+
+  it('says what is missing instead of failing on an instance without a client', async () => {
+    fs.rmSync(path.join(dir(), 'gog'), { recursive: true });
+    expect((await call(MEMBER, 'GET', '')).json().data.readiness).toBe('pending'); // org client + env: being installed
+    fs.rmSync(path.join(dir(), 'env'));
+    expect((await call(MEMBER, 'GET', '')).json().data.readiness).toBe('restart');
+  });
+});
+

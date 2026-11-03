@@ -455,7 +455,7 @@ export function generateOpenClawConfig(options: {
 
   const activeProviders = (options.activeProviderIds ?? [])
     .map((id) => PROVIDERS.find((p) => p.id === id))
-    .filter((p) => p && p.kind !== 'secret') as typeof PROVIDERS;
+    .filter((p) => p && (p.kind ?? 'model') === 'model') as typeof PROVIDERS;
 
   // A pinned model names its provider through the catalog; it only counts when
   // that provider is active for this member, else fall through to the provider pin.

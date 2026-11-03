@@ -18,6 +18,10 @@ import {
   rejectDeviceRequest,
   collectDeviceRequests,
   syncGatewayConfig,
+  getGoogleAccounts,
+  startGoogleSignIn,
+  finishGoogleSignIn,
+  removeGoogleAccount,
   GatewayLimitError,
 } from '../../services/gateway.js';
 import {
@@ -61,7 +65,7 @@ function maskToken(token: string): string {
  * instances; owners and admins on anyone's — except that, as for role changes,
  * an admin cannot `release` (open) an owner's gateway.
  */
-function requireGatewayAccess(opts: { release?: boolean } = {}) {
+function requireGatewayAccess(opts: { release?: boolean; ownOnly?: boolean } = {}) {
   return async (request: FastifyRequest, reply: FastifyReply) => {
     const { gatewayId } = request.params as { gatewayId: string };
     const row = findGatewayRow(request.orgId!, gatewayId);
@@ -70,6 +74,9 @@ function requireGatewayAccess(opts: { release?: boolean } = {}) {
     }
     const me = request.orgMember!;
     if (row.member_id !== me.id) {
+      if (opts.ownOnly) {
+        return reply.status(403).send({ error: 'forbidden', message: 'Only the instance’s own member can do this' });
+      }
       if (!['owner', 'admin'].includes(me.role)) {
         return reply.status(403).send({ error: 'forbidden', message: 'Insufficient permissions' });
       }
@@ -440,4 +447,57 @@ export async function orgGatewayRoutes(app: FastifyInstance) {
       },
     );
   }
+
+  // Google sign-in for gog. Anyone who may see the instance sees which accounts
+  // are connected; only its own member can connect or disconnect one, because
+  // whatever Google account is signed in to the browser is the one that gets
+  // linked.
+  app.get(
+    '/api/orgs/:orgId/gateways/:gatewayId/google',
+    { preHandler: requireGatewayAccess() },
+    async (request, reply) => {
+      try {
+        return { data: await getGoogleAccounts(request.orgId!, request.gateway!.id) };
+      } catch (err: any) {
+        return sendGatewayError(reply, err);
+      }
+    },
+  );
+
+  app.post<{ Body: { email?: string } }>(
+    '/api/orgs/:orgId/gateways/:gatewayId/google/start',
+    { preHandler: requireGatewayAccess({ ownOnly: true }) },
+    async (request, reply) => {
+      try {
+        return { data: await startGoogleSignIn(request.orgId!, request.gateway!.id, String(request.body?.email ?? '')) };
+      } catch (err: any) {
+        return sendGatewayError(reply, err);
+      }
+    },
+  );
+
+  app.post<{ Body: { email?: string; url?: string } }>(
+    '/api/orgs/:orgId/gateways/:gatewayId/google/finish',
+    { preHandler: requireGatewayAccess({ ownOnly: true }) },
+    async (request, reply) => {
+      try {
+        const { email, url } = request.body ?? {};
+        return { data: await finishGoogleSignIn(request.orgId!, request.gateway!.id, String(email ?? ''), String(url ?? '')) };
+      } catch (err: any) {
+        return sendGatewayError(reply, err);
+      }
+    },
+  );
+
+  app.delete<{ Params: { email: string } }>(
+    '/api/orgs/:orgId/gateways/:gatewayId/google/accounts/:email',
+    { preHandler: requireGatewayAccess({ ownOnly: true }) },
+    async (request, reply) => {
+      try {
+        return { data: await removeGoogleAccount(request.orgId!, request.gateway!.id, request.params.email) };
+      } catch (err: any) {
+        return sendGatewayError(reply, err);
+      }
+    },
+  );
 }

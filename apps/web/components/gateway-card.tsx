@@ -6,6 +6,7 @@ import { PROVIDERS, providerForModel, type Gateway } from '@clawhuddle/shared';
 import { gatewayUrl, gatewayLabel } from '@/lib/gateway-url';
 import { useToast } from '@/components/ui/toast';
 import { useConfirm } from '@/components/ui/confirm-dialog';
+import { GoogleConnect } from '@/components/google-connect';
 
 type OrgFetch = <T>(path: string, options?: RequestInit) => Promise<T>;
 
@@ -180,6 +181,7 @@ export function GatewayCard({ gateway, orgFetch, onChanged, activeProviders }: P
             <span style={{ color: 'var(--text-secondary)' }}>Restart</span> reboots the instance as it is.{' '}
             <span style={{ color: 'var(--text-secondary)' }}>Redeploy</span> rebuilds it from the current config — use it after changing skills, API keys, channels or the model. Both take a few minutes.
           </p>
+          <GoogleConnect gatewayId={gateway.id} orgFetch={orgFetch} />
         </>
       ) : status === 'deploying' || status === 'provisioning' ? (
         <div className="flex items-center justify-between py-2">

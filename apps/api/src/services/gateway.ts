@@ -170,12 +170,15 @@ function writeAuthProfiles(ref: GatewayRef, persist = true): {
   profiles: Record<string, Record<string, unknown>>;
   fingerprints: Record<string, string>;
   secrets: ManagedSecret[];
+  /** Google OAuth client JSON for gog (kind 'oauth-client'), member key first. */
+  gogClient: string | null;
 } {
   const allKeys = getResolvedApiKeysForMember(ref.org_id, ref.user_id);
   const profiles: Record<string, Record<string, unknown>> = {};
   const fingerprints: Record<string, string> = {};
   const providerIds: string[] = [];
   const secrets: ManagedSecret[] = [];
+  let gogClient: string | null = null;
   const modelOverrides: Record<string, string> = {};
   const order: Record<string, string[]> = {};
   const providerCounters: Record<string, number> = {};
@@ -196,6 +199,10 @@ function writeAuthProfiles(ref: GatewayRef, persist = true): {
     if (!providerConfig) continue;
     // Secret-store credentials (Notion) never touch auth-profiles.json and do
     // not count as a provider; ensureGatewaySecrets puts them in the store.
+    if (providerConfig.kind === 'oauth-client') {
+      if (gogClient === null) gogClient = key;
+      continue;
+    }
     if (providerConfig.kind === 'secret') {
       if (providerConfig.secret && !secrets.some((s) => s.name === providerConfig.secret!.name)) {
         secrets.push({ provider, value: key, ...providerConfig.secret });
@@ -290,7 +297,7 @@ function writeAuthProfiles(ref: GatewayRef, persist = true): {
     );
   }
 
-  return { providerIds, modelOverrides, clawProxyKey, tokenKioskKey, profiles, fingerprints, secrets };
+  return { providerIds, modelOverrides, clawProxyKey, tokenKioskKey, profiles, fingerprints, secrets, gogClient };
 }
 
 // ---------------------------------------------------------------------------
@@ -350,7 +357,8 @@ function secretsOutOfDate(ref: GatewayRef, secrets: ManagedSecret[]): boolean {
  * touched, whatever key the org holds.
  */
 export function secretStatusFor(g: GatewayRow): Record<string, SecretInjectionState> {
-  const resolved = new Map(writeAuthProfiles(g, false).secrets.map((s) => [s.provider, s] as const));
+  const auth = writeAuthProfiles(g, false);
+  const resolved = new Map(auth.secrets.map((s) => [s.provider, s] as const));
   const state = readSecretState(g);
   const out: Record<string, SecretInjectionState> = {};
   for (const p of PROVIDERS) {
@@ -361,6 +369,9 @@ export function secretStatusFor(g: GatewayRow): Record<string, SecretInjectionSt
     else if (!s) out[p.id] = "none";
     else if (rec && rec.fingerprint === secretFingerprint(s.value)) out[p.id] = "injected";
     else out[p.id] = "pending";
+  }
+  for (const p of PROVIDERS) {
+    if (p.kind === "oauth-client") out[p.id] = gogClientState(g, auth.gogClient);
   }
   return out;
 }
@@ -385,7 +396,14 @@ export function ensureGatewaySecrets(g: GatewayRow): Promise<void> {
 async function syncGatewaySecrets(g: GatewayRow): Promise<void> {
   const containerName = containerNameFor(g);
   if (!(await checkGatewayHealth(containerName))) return;
+  // Independent steps: a failure in one must not hold up the other.
+  await syncSecretStore(g, containerName)
+    .catch((err) => console.warn(`[gateway] secret store sync failed for ${refLabel(g)}:`, err));
+  await syncGogClient(g, containerName)
+    .catch((err) => console.warn(`[gateway] gog client setup failed for ${refLabel(g)}:`, err));
+}
 
+async function syncSecretStore(g: GatewayRow, containerName: string): Promise<void> {
   const desired = writeAuthProfiles(g, false).secrets;
   const listed = JSON.parse(
     await execInContainer(containerName, ["openclaw", "secrets", "store", "list", "--json"], 30000),
@@ -449,6 +467,255 @@ function scheduleSecretSync(g: GatewayRow): void {
     setTimeout(tick, 15000).unref();
   };
   setTimeout(tick, 15000).unref();
+}
+
+// ---------------------------------------------------------------------------
+// gog (Google Workspace CLI) OAuth client. An org key of kind 'oauth-client'
+// holds the shared client JSON; every instance without a gog client of its
+// own gets it via `gog auth credentials set`, so a member only has to run
+// `gog auth add <email>`. gog keeps the client secret (and later the member's
+// refresh tokens) in a file keyring whose password must be in the
+// environment of every process that uses it, including the gateway's agents.
+// The entrypoint exports /root/.openclaw/env at boot, so the password goes in
+// there BEFORE the instance (re)boots, and the client is set once it is up.
+//
+// An instance whose gog already had a client when we first looked (no record
+// of ours) belongs to its member and is never touched: Vasily runs his own.
+// ---------------------------------------------------------------------------
+
+type GogState = { fingerprint: string };
+
+const GOG_ENV_KEYS = ["GOG_KEYRING_BACKEND", "GOG_KEYRING_PASSWORD"] as const;
+
+const gogStatePath = (ref: GatewayRef) => path.join(getGatewayDir(ref), ".clawhuddle-gog.json");
+const gogCredentialsPath = (ref: GatewayRef) => path.join(getGatewayDir(ref), "gog", "data", "credentials.json");
+const memberEnvPath = (ref: GatewayRef) => path.join(getGatewayDir(ref), "env");
+
+function readGogState(ref: GatewayRef): GogState | undefined {
+  try {
+    return JSON.parse(fs.readFileSync(gogStatePath(ref), "utf-8")) as GogState;
+  } catch {
+    return undefined;
+  }
+}
+
+/** gog already has a client we did not put there. */
+function gogMemberManaged(ref: GatewayRef): boolean {
+  return !readGogState(ref) && fs.existsSync(gogCredentialsPath(ref));
+}
+
+/** KEY=value lines of the member env file the entrypoint loads. */
+function readMemberEnv(ref: GatewayRef): Map<string, string> {
+  const env = new Map<string, string>();
+  try {
+    for (const line of fs.readFileSync(memberEnvPath(ref), "utf-8").split("\n")) {
+      const m = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line);
+      if (m) env.set(m[1], m[2]);
+    }
+  } catch { /* no file */ }
+  return env;
+}
+
+const gogEnvReady = (ref: GatewayRef) => {
+  const env = readMemberEnv(ref);
+  return GOG_ENV_KEYS.every((k) => env.has(k));
+};
+
+export function gogClientState(ref: GatewayRef, client: string | null): SecretInjectionState {
+  if (gogMemberManaged(ref)) return "member";
+  if (!client) return "none";
+  if (readGogState(ref)?.fingerprint === secretFingerprint(client)) return "injected";
+  return gogEnvReady(ref) ? "pending" : "restart";
+}
+
+/**
+ * Before an instance boots: add the gog keyring settings to its env file when
+ * the org has a client to install and gog is not the member's own. Never
+ * changes a value already there (a keyring is unreadable under a new password).
+ */
+export function ensureGogEnv(ref: GatewayRef): void {
+  if (!writeAuthProfiles(ref, false).gogClient || gogMemberManaged(ref)) return;
+  const env = readMemberEnv(ref);
+  const add: string[] = [];
+  if (!env.has("GOG_KEYRING_BACKEND")) add.push("GOG_KEYRING_BACKEND=file");
+  if (!env.has("GOG_KEYRING_PASSWORD")) add.push(`GOG_KEYRING_PASSWORD=${crypto.randomBytes(24).toString("hex")}`);
+  if (add.length === 0) return;
+  const file = memberEnvPath(ref);
+  const current = fs.existsSync(file) ? fs.readFileSync(file, "utf-8") : "";
+  const sep = current && !current.endsWith("\n") ? "\n" : "";
+  fs.writeFileSync(file, `${current}${sep}${add.join("\n")}\n`, { mode: 0o600 });
+  fs.chmodSync(file, 0o600);
+  console.log(`[gateway] gog keyring env added for ${refLabel(ref)} (${add.map((l) => l.split("=")[0]).join(", ")})`);
+}
+
+function gogClientOutOfDate(ref: GatewayRef, client: string | null): boolean {
+  return gogClientState(ref, client) === "pending";
+}
+
+/** On a running instance whose env carries the keyring settings: install or update our client. */
+async function syncGogClient(g: GatewayRow, containerName: string): Promise<void> {
+  const client = writeAuthProfiles(g, false).gogClient;
+  if (!gogClientOutOfDate(g, client)) return;
+  const tmp = ".clawhuddle-gog-client.tmp.json";
+  const hostPath = path.join(getGatewayDir(g), tmp);
+  fs.writeFileSync(hostPath, client!, { mode: 0o600 });
+  try {
+    // Same env the gateway process got from the entrypoint; nothing secret on the command line.
+    await execInContainer(containerName, [
+      "sh", "-c", 'set -a; . /root/.openclaw/env; set +a; exec gog auth credentials set "$0"', `/root/.openclaw/${tmp}`,
+    ], 30000);
+  } finally {
+    fs.rmSync(hostPath, { force: true });
+  }
+  fs.writeFileSync(gogStatePath(g), JSON.stringify({ fingerprint: secretFingerprint(client!) }, null, 2), { mode: 0o600 });
+  console.log(`[gateway] gog OAuth client set for ${refLabel(g)}`);
+}
+
+// ---------------------------------------------------------------------------
+// Google sign-in for gog from the Home card. gog's remote flow: step 1 prints
+// Google's consent URL; after consent Google sends the browser to a loopback
+// address (the client is a Desktop client, which only allows loopback
+// redirects) that does not load, and the member pastes that address back;
+// step 2 exchanges the code and stores the refresh token in gog's keyring.
+// ---------------------------------------------------------------------------
+
+/** Scopes asked for on sign-in; the set the hand recipe has used since October. */
+export const GOG_SIGN_IN_SERVICES = "gmail,calendar,drive,docs,sheets,slides";
+
+/**
+ * Flags shared by both steps. gog checks step 2 against the state step 1
+ * saved, and any difference (a missing --force-consent included) is refused
+ * as "manual auth state mismatch".
+ */
+const GOG_SIGN_IN_FLAGS = '--services "$1" --remote --force-consent --json --no-input';
+
+/**
+ * ready: gog has a client and its keyring unlocks. pending: our client is being
+ * installed right now. restart: it gets one at the next restart or redeploy.
+ * no-client: the org has none to give. keyring: the member's own gog setup has
+ * no keyring password in the instance env, so gog cannot store a sign-in.
+ */
+export type GoogleSignInReadiness = "ready" | "pending" | "restart" | "no-client" | "keyring";
+
+export interface GoogleAccountsInfo {
+  readiness: GoogleSignInReadiness;
+  accounts: { email: string; services: string[] }[];
+}
+
+const EMAIL_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
+
+function assertEmail(email: string): void {
+  if (typeof email !== "string" || email.length > 254 || !EMAIL_RE.test(email)) throw new Error("Enter a valid Google account email");
+}
+
+/** gog errors can quote URLs; keep them free of codes and tokens before they reach a browser. */
+function gogErrorMessage(err: unknown): string {
+  let raw = err instanceof Error ? err.message : String(err);
+  // gog prints a generic hint before its JSON error; keep only the error itself.
+  const json = raw.lastIndexOf('{"error"');
+  if (json >= 0) {
+    try { raw = String(JSON.parse(raw.slice(json)).error?.message ?? raw); } catch { /* keep raw */ }
+  }
+  if (/state mismatch|state.*(not found|expired)/i.test(raw)) {
+    return "This sign-in link is no longer the current one. Click Cancel, then Connect Google again and use the new tab.";
+  }
+  if (/invalid_grant/.test(raw)) {
+    return "Google did not accept that code (it may have expired or been used already). Click Cancel and connect again.";
+  }
+  return raw
+    .replace(/GOCSPX[-_A-Za-z0-9]+/g, "<redacted>")
+    .replace(/\bya29\.[-_.A-Za-z0-9]+/g, "<redacted>")
+    .replace(/\b1\/\/[-_A-Za-z0-9]+/g, "<redacted>")
+    .replace(/([?&](?:code|state)=)[^&\s"]+/g, "$1<redacted>")
+    .split("\n").filter((l) => l.trim()).slice(-3).join(" ")
+    .slice(0, 400);
+}
+
+/** Runs gog in the instance with the env the gateway booted with. */
+function execGog(containerName: string, script: string, args: string[], timeoutMs = 30000): Promise<string> {
+  return execInContainer(containerName, [
+    "sh", "-c", `[ -f /root/.openclaw/env ] && { set -a; . /root/.openclaw/env; set +a; }; ${script}`, ...args,
+  ], timeoutMs);
+}
+
+function googleReadiness(g: GatewayRow): GoogleSignInReadiness {
+  if (fs.existsSync(gogCredentialsPath(g))) return gogEnvReady(g) ? "ready" : "keyring";
+  if (!writeAuthProfiles(g, false).gogClient) return "no-client";
+  return gogEnvReady(g) ? "pending" : "restart";
+}
+
+export async function getGoogleAccounts(orgId: string, gatewayId: string): Promise<GoogleAccountsInfo> {
+  const g = requireRunning(orgId, gatewayId);
+  const readiness = googleReadiness(g);
+  if (readiness === "pending") void ensureGatewaySecrets(g);
+  if (readiness !== "ready") return { readiness, accounts: [] };
+  const out = await execGog(containerNameFor(g), "exec gog auth list --json --no-input", []);
+  const parsed = JSON.parse(out) as { accounts?: { email: string; services?: string[] }[] };
+  return {
+    readiness,
+    accounts: (parsed.accounts ?? []).map((a) => ({ email: a.email, services: a.services ?? [] })),
+  };
+}
+
+export async function startGoogleSignIn(orgId: string, gatewayId: string, email: string): Promise<{ authUrl: string }> {
+  assertEmail(email);
+  const g = requireRunning(orgId, gatewayId);
+  if (googleReadiness(g) !== "ready") throw new Error("Google sign-in is not set up on this instance yet");
+  let out: string;
+  try {
+    out = await execGog(containerNameFor(g),
+      `exec gog auth add "$0" --step=1 ${GOG_SIGN_IN_FLAGS}`,
+      [email, GOG_SIGN_IN_SERVICES]);
+  } catch (err) {
+    throw new Error(gogErrorMessage(err));
+  }
+  const authUrl = (JSON.parse(out.slice(out.indexOf("{"))) as { auth_url?: string }).auth_url;
+  if (!authUrl || !authUrl.startsWith("https://accounts.google.com/")) throw new Error("gog did not return a Google sign-in link");
+  return { authUrl };
+}
+
+/** The address Google sent the browser to: loopback, with the code and state. */
+function assertRedirect(raw: string): string {
+  let u: URL;
+  try { u = new URL(String(raw).trim()); } catch { throw new Error("Paste the full address from the browser’s address bar"); }
+  if (!["127.0.0.1", "localhost"].includes(u.hostname) || u.protocol !== "http:") {
+    throw new Error("That is not the address Google redirected to (it starts with http://127.0.0.1)");
+  }
+  if (u.searchParams.get("error")) throw new Error(`Google reported: ${u.searchParams.get("error")}`);
+  if (!u.searchParams.get("code") || !u.searchParams.get("state")) throw new Error("The address has no sign-in code; paste it exactly as shown");
+  return u.toString();
+}
+
+export async function finishGoogleSignIn(orgId: string, gatewayId: string, email: string, redirectUrl: string): Promise<GoogleAccountsInfo> {
+  assertEmail(email);
+  const url = assertRedirect(redirectUrl);
+  const g = requireRunning(orgId, gatewayId);
+  const tmp = ".clawhuddle-google-redirect.tmp";
+  const hostPath = path.join(getGatewayDir(g), tmp);
+  fs.writeFileSync(hostPath, url, { mode: 0o600 });
+  try {
+    await execGog(containerNameFor(g),
+      `exec gog auth add "$0" --step=2 --auth-url "$(cat "$2")" ${GOG_SIGN_IN_FLAGS}`,
+      [email, GOG_SIGN_IN_SERVICES, `/root/.openclaw/${tmp}`], 60000);
+  } catch (err) {
+    throw new Error(gogErrorMessage(err));
+  } finally {
+    fs.rmSync(hostPath, { force: true });
+  }
+  console.log(`[gateway] Google account ${email} signed in to gog on ${refLabel(g)}`);
+  return getGoogleAccounts(orgId, gatewayId);
+}
+
+export async function removeGoogleAccount(orgId: string, gatewayId: string, email: string): Promise<GoogleAccountsInfo> {
+  assertEmail(email);
+  const g = requireRunning(orgId, gatewayId);
+  try {
+    await execGog(containerNameFor(g), 'exec gog auth remove "$0" --force --no-input', [email]);
+  } catch (err) {
+    throw new Error(gogErrorMessage(err));
+  }
+  console.log(`[gateway] Google account ${email} removed from gog on ${refLabel(g)}`);
+  return getGoogleAccounts(orgId, gatewayId);
 }
 
 const TOKEN_KIOSK_DEFAULT_URL = 'https://agent-router.gaib.ai/v1';
@@ -752,6 +1019,7 @@ export async function deployGateway(orgId: string, gatewayId: string) {
     throw new Error("No API keys configured — add at least one provider key");
 
   writeOpenClawConfig(g, configOptionsFor(g, auth));
+  ensureGogEnv(g);
 
   // Install skill directories (shared per user, copied into every instance)
   await installSkillsForUser(path.join(g.org_id, gatewayDirName(g.user_id, g.slot)), getMemberSkills(orgId, g.user_id));
@@ -800,9 +1068,11 @@ export async function startGateway(orgId: string, gatewayId: string) {
   // gateway would come back up on the old credential without saying so.
   const { profiles, fingerprints } = writeAuthProfiles(g);
   reconcileAuthProfileStore(g, profiles, fingerprints);
+  ensureGogEnv(g);
 
   await docker.getContainer(containerNameFor(g)).start();
   setGatewayState(g.id, { status: "deploying" });
+  scheduleSecretSync(g);
   return publicState(getGatewayRow(orgId, gatewayId));
 }
 
@@ -815,6 +1085,7 @@ export async function restartGateway(orgId: string, gatewayId: string) {
   const g = getGatewayRow(orgId, gatewayId);
   const { profiles, fingerprints } = writeAuthProfiles(g);
   reconcileAuthProfileStore(g, profiles, fingerprints);
+  ensureGogEnv(g);
 
   await docker.getContainer(containerNameFor(g)).restart();
   setGatewayState(g.id, { status: "deploying" });
@@ -888,7 +1159,8 @@ export async function getGatewayStatus(orgId: string, gatewayId: string) {
   }
 
   if (actual !== g.status) setGatewayState(g.id, { status: actual });
-  if (actual === "running" && (g.status !== "running" || secretsOutOfDate(g, writeAuthProfiles(g, false).secrets))) {
+  const auth = actual === "running" ? writeAuthProfiles(g, false) : null;
+  if (auth && (g.status !== "running" || secretsOutOfDate(g, auth.secrets) || gogClientOutOfDate(g, auth.gogClient))) {
     void ensureGatewaySecrets({ ...g, status: actual });
   }
   return publicState({ ...g, status: actual });

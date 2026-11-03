@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { useToast } from '@/components/ui/toast';
-import { PROVIDERS, type CredentialType, type ModelOption, type SecretStatusEntry, type SecretInjectionState } from '@clawhuddle/shared';
+import { PROVIDERS, parseGoogleOAuthClient, type CredentialType, type ModelOption, type SecretStatusEntry, type SecretInjectionState } from '@clawhuddle/shared';
 import { gatewayLabel } from '@/lib/gateway-url';
 
 type FetchFn = <T>(path: string, options?: RequestInit) => Promise<T>;
@@ -73,6 +73,7 @@ function SecretStateBadge({ state, running }: { state: SecretInjectionState; run
     pending: running
       ? { label: 'Injecting…', bg: 'rgba(59,130,246,0.15)', color: '#3b82f6' }
       : { label: 'Injects on next start', bg: 'var(--bg-tertiary)', color: 'var(--text-tertiary)' },
+    restart: { label: 'Applies on next restart', bg: 'var(--bg-tertiary)', color: 'var(--text-tertiary)' },
     member: { label: 'Member’s own entry', bg: 'var(--bg-tertiary)', color: 'var(--text-secondary)' },
     none: { label: 'No key', bg: 'rgba(239,68,68,0.12)', color: '#ef4444' },
   }[state];
@@ -130,6 +131,11 @@ export function ApiKeyForm({ initialKeys, fetchFn, scope = 'org', summary, onMut
     const providerConfig = PROVIDERS.find((p) => p.id === provider);
     const tabs = providerConfig ? getAvailableTabs(providerConfig) : ['api_key' as const];
     const credentialType: CredentialType = credTabs[provider] ?? tabs[0];
+
+    if (providerConfig?.kind === 'oauth-client' && !parseGoogleOAuthClient(key)) {
+      toast('Paste the whole client_secret_….json from Google Cloud Console', 'error');
+      return;
+    }
 
     // Validate OAuth JSON before sending
     if (credentialType === 'oauth') {
@@ -224,6 +230,8 @@ export function ApiKeyForm({ initialKeys, fetchFn, scope = 'org', summary, onMut
       {visibleProviders.map((providerConfig) => {
         const { id, label, placeholder, defaultModel, models, supportsSetupToken, setupTokenInstructions, supportsOAuth, oauthInstructions, secret } = providerConfig;
         const isSecret = providerConfig.kind === 'secret' && !!secret;
+        const isOAuthClient = providerConfig.kind === 'oauth-client';
+        const showsInstanceStatus = isSecret || isOAuthClient;
         const tabs = getAvailableTabs(providerConfig);
         const activeTab = credTabs[id] ?? tabs[0];
         const firstExisting = keysForProvider(id)[0];
@@ -249,7 +257,11 @@ export function ApiKeyForm({ initialKeys, fetchFn, scope = 'org', summary, onMut
                 </h3>
                 {isUserScope && <SourceBadge source={source} />}
               </div>
-              {isSecret ? (
+              {isOAuthClient ? (
+                <span className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
+                  gog CLI · org-wide
+                </span>
+              ) : isSecret ? (
                 <span className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
                   Secret store · <code className="font-mono">{secret!.name}</code>
                 </span>
@@ -285,6 +297,18 @@ export function ApiKeyForm({ initialKeys, fetchFn, scope = 'org', summary, onMut
                 </span>
               )}
             </div>
+
+            {isOAuthClient && (
+              <p className="text-xs mb-3" style={{ color: 'var(--text-tertiary)' }}>
+                Not a model key. Paste the OAuth client JSON (<code className="font-mono">client_secret_….json</code>)
+                from Google Cloud Console. Every instance whose member has not set up gog with a client of their own
+                gets it: the keyring password is added to the instance’s env file before it boots, then
+                {' '}<code className="font-mono">gog auth credentials set</code> installs the client, with the secret kept
+                in gog’s encrypted keyring. New instances get it on their first boot; existing ones at their next
+                restart or redeploy. Members still sign in themselves with{' '}
+                <code className="font-mono">gog auth add &lt;email&gt;</code>.
+              </p>
+            )}
 
             {isSecret && (
               <p className="text-xs mb-3" style={{ color: 'var(--text-tertiary)' }}>
@@ -394,7 +418,7 @@ export function ApiKeyForm({ initialKeys, fetchFn, scope = 'org', summary, onMut
               );
             })()}
 
-            {isSecret && secretStatus && secretStatus.length > 0 && (
+            {showsInstanceStatus && secretStatus && secretStatus.length > 0 && (
               <div className="mb-3 rounded-lg overflow-hidden" style={{ border: '1px solid var(--border-subtle)' }}>
                 {secretStatus.map((e, i) => {
                   const who = e.name || e.email;
@@ -463,11 +487,11 @@ export function ApiKeyForm({ initialKeys, fetchFn, scope = 'org', summary, onMut
             )}
 
             <div className="flex gap-2">
-              {activeTab === 'oauth' ? (
+              {activeTab === 'oauth' || isOAuthClient ? (
                 <textarea
                   value={inputs[id] ?? ''}
                   onChange={(e) => setInputs((prev) => ({ ...prev, [id]: e.target.value }))}
-                  placeholder='{"access_token": "...", "refresh_token": "...", "expires_at": "..."}'
+                  placeholder={isOAuthClient ? placeholder : '{"access_token": "...", "refresh_token": "...", "expires_at": "..."}'}
                   rows={3}
                   className="flex-1 px-3 py-2 text-xs font-mono rounded-lg resize-none"
                 />
