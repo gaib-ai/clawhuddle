@@ -132,7 +132,7 @@ export function GoogleConnect({ gatewayId, orgFetch }: { gatewayId: string; orgF
     <button
       onClick={onClick}
       disabled={disabled || busy}
-      className="px-3 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50 shrink-0"
+      className="px-3 py-2.5 sm:py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50 shrink-0 max-sm:flex-1"
       style={primary
         ? { background: 'var(--accent)', color: 'var(--text-inverse)' }
         : { background: 'var(--bg-secondary)', color: 'var(--text-secondary)', border: '1px solid var(--border-primary)' }}
@@ -173,7 +173,7 @@ export function GoogleConnect({ gatewayId, orgFetch }: { gatewayId: string; orgF
               <button
                 onClick={() => disconnect(a.email)}
                 disabled={busy}
-                className="text-[11px] disabled:opacity-50 shrink-0"
+                className="py-1.5 sm:py-0 text-[11px] disabled:opacity-50 shrink-0"
                 style={{ color: 'var(--text-tertiary)' }}
                 onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--red)'; }}
                 onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-tertiary)'; }}
@@ -190,14 +190,14 @@ export function GoogleConnect({ gatewayId, orgFetch }: { gatewayId: string; orgF
           <p className="text-[11px] mb-2" style={muted}>
             Which Google account should your assistant use? Sign in to Google with the same account in the next tab.
           </p>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap sm:flex-nowrap gap-2">
             <input
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter' && email.trim()) void openGoogle(); }}
               type="email"
               placeholder="you@company.com"
-              className="flex-1 px-2 py-1.5 text-xs rounded-md"
+              className="basis-full sm:basis-auto flex-1 min-w-0 px-2 py-2 sm:py-1.5 text-xs rounded-md"
               style={input}
             />
             {smallBtn('Open Google sign-in', openGoogle, !email.trim(), true)}
@@ -213,13 +213,16 @@ export function GoogleConnect({ gatewayId, orgFetch }: { gatewayId: string; orgF
             (“This site can’t be reached”, address starting with <code>http://127.0.0.1</code>).
             That is expected: copy that tab’s full address and paste it here, then close the tab.
           </p>
-          <div className="flex gap-2">
+          <p className="sm:hidden text-[11px] mb-2" style={muted}>
+            On iPhone: in that tab, tap the address bar, tap the address again, choose Select All, then Copy, and switch back to this tab.
+          </p>
+          <div className="flex flex-wrap sm:flex-nowrap gap-2">
             <input
               value={redirect}
               onChange={(e) => setRedirect(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter' && redirect.trim()) void finish(); }}
               placeholder="http://127.0.0.1:…/oauth2/callback?state=…&code=…"
-              className="flex-1 px-2 py-1.5 text-xs font-mono rounded-md"
+              className="basis-full sm:basis-auto flex-1 min-w-0 px-2 py-2 sm:py-1.5 text-xs font-mono rounded-md"
               style={input}
             />
             {smallBtn('Finish', finish, !redirect.trim(), true)}

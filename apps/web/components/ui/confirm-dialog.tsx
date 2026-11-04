@@ -69,6 +69,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
 
           {/* Dialog */}
           <div
+            className="modal-frame"
             style={{
               position: 'fixed',
               inset: 0,
@@ -76,10 +77,10 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              padding: 24,
             }}
           >
             <div
+              className="modal-card"
               style={{
                 background: 'var(--bg-secondary)',
                 border: '1px solid var(--border-primary)',
@@ -87,7 +88,6 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
                 boxShadow: '0 16px 48px rgba(0,0,0,0.6)',
                 width: '100%',
                 maxWidth: 400,
-                padding: 24,
                 animation: state.exiting ? 'dialog-exit 0.15s ease-in forwards' : 'dialog-enter 0.2s ease-out',
               }}
             >
@@ -120,6 +120,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
                 <button
                   onClick={() => close(false)}
+                  className="max-sm:flex-1 max-sm:!py-3"
                   style={{
                     padding: '8px 16px',
                     borderRadius: 8,
@@ -146,6 +147,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
                 <button
                   onClick={() => close(true)}
                   autoFocus
+                  className="max-sm:flex-1 max-sm:!py-3"
                   style={{
                     padding: '8px 16px',
                     borderRadius: 8,

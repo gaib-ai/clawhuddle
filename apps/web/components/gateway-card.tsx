@@ -105,7 +105,7 @@ export function GatewayCard({ gateway, orgFetch, onChanged, activeProviders }: P
     <button
       onClick={onClick}
       disabled={disabled || !!busy}
-      className="flex-1 py-2.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+      className={`flex-1 py-3 sm:py-2.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 ${extra}`}
       style={{ background: 'var(--accent)', color: 'var(--text-inverse)' }}
       onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--accent-hover)'; }}
       onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--accent)'; }}
@@ -117,7 +117,7 @@ export function GatewayCard({ gateway, orgFetch, onChanged, activeProviders }: P
     <button
       onClick={onClick}
       disabled={!!busy}
-      className="px-4 py-2.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+      className="px-2 sm:px-4 py-3 sm:py-2.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
       style={{ background: 'var(--bg-secondary)', color: 'var(--text-secondary)', border: '1px solid var(--border-primary)' }}
       onMouseEnter={(e) => { e.currentTarget.style.borderColor = danger ? 'var(--red)' : 'var(--accent)'; e.currentTarget.style.color = danger ? 'var(--red)' : 'var(--accent)'; }}
       onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border-primary)'; e.currentTarget.style.color = 'var(--text-secondary)'; }}
@@ -150,7 +150,7 @@ export function GatewayCard({ gateway, orgFetch, onChanged, activeProviders }: P
         ) : (
           <button
             onClick={() => { setLabelInput(gateway.label ?? ''); setEditingLabel(true); }}
-            className="text-sm font-semibold text-left hover:underline"
+            className="min-w-0 truncate text-sm font-semibold text-left hover:underline"
             style={{ color: 'var(--text-primary)' }}
             title="Rename"
           >
@@ -167,8 +167,9 @@ export function GatewayCard({ gateway, orgFetch, onChanged, activeProviders }: P
 
       {status === 'running' ? (
         <>
-          <div className="flex gap-2">
-            {primaryBtn('Open', open)}
+          {/* Phones: Open on its own row, the other three underneath. */}
+          <div className="grid grid-cols-3 gap-2 sm:flex">
+            {primaryBtn('Open', open, false, 'col-span-3')}
             {quietBtn('Restart', restart)}
             {quietBtn('Redeploy', redeploy)}
             {quietBtn('Stop', stop, true)}
@@ -184,7 +185,7 @@ export function GatewayCard({ gateway, orgFetch, onChanged, activeProviders }: P
           <GoogleConnect gatewayId={gateway.id} orgFetch={orgFetch} />
         </>
       ) : status === 'deploying' || status === 'provisioning' ? (
-        <div className="flex items-center justify-between py-2">
+        <div className="flex items-center justify-between gap-3 py-2">
           <div className="flex items-center gap-2">
             <div
               className="w-4 h-4 rounded-full border-2 animate-spin"
@@ -203,14 +204,14 @@ export function GatewayCard({ gateway, orgFetch, onChanged, activeProviders }: P
         </div>
       )}
 
-      <div className="flex items-center justify-between gap-3 mt-4 pt-3" style={{ borderTop: '1px solid var(--border-subtle)' }}>
-        <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--text-tertiary)' }}>
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 mt-4 pt-3" style={{ borderTop: '1px solid var(--border-subtle)' }}>
+        <label className="flex flex-1 sm:flex-none min-w-0 items-center gap-2 text-xs" style={{ color: 'var(--text-tertiary)' }}>
           Model
           <select
             value={gateway.primary_model ?? ''}
             onChange={(e) => setModel(e.target.value)}
             disabled={!!busy}
-            className="px-2 py-1 text-xs rounded-md"
+            className="flex-1 sm:flex-none min-w-0 px-2 py-2 sm:py-1 text-xs rounded-md"
             style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-subtle)' }}
           >
             <option value="">Follow my default</option>
@@ -230,7 +231,7 @@ export function GatewayCard({ gateway, orgFetch, onChanged, activeProviders }: P
         <button
           onClick={remove}
           disabled={!!busy}
-          className="text-xs font-medium transition-colors disabled:opacity-50"
+          className="py-2 sm:py-0 text-xs font-medium transition-colors disabled:opacity-50"
           style={{ color: 'var(--red)' }}
           onMouseEnter={(e) => { e.currentTarget.style.opacity = '0.7'; }}
           onMouseLeave={(e) => { e.currentTarget.style.opacity = '1'; }}

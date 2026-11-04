@@ -56,6 +56,7 @@ export function MemberApiKeysModal({ member, fetchFn, onClose }: Props) {
         onClick={onClose}
       />
       <div
+        className="modal-frame"
         style={{
           position: 'fixed',
           inset: 0,
@@ -63,11 +64,11 @@ export function MemberApiKeysModal({ member, fetchFn, onClose }: Props) {
           display: 'flex',
           alignItems: 'flex-start',
           justifyContent: 'center',
-          padding: 24,
           overflowY: 'auto',
         }}
       >
         <div
+          className="modal-card"
           style={{
             background: 'var(--bg-secondary)',
             border: '1px solid var(--border-primary)',
@@ -77,7 +78,6 @@ export function MemberApiKeysModal({ member, fetchFn, onClose }: Props) {
             maxWidth: 560,
             marginTop: 40,
             marginBottom: 40,
-            padding: 24,
             animation: 'dialog-enter 0.2s ease-out',
           }}
         >
@@ -87,7 +87,7 @@ export function MemberApiKeysModal({ member, fetchFn, onClose }: Props) {
             </h3>
             <button
               onClick={onClose}
-              className="text-sm px-2"
+              className="text-xl leading-none w-10 h-10 -mr-2 -mt-2 flex items-center justify-center shrink-0"
               style={{ color: 'var(--text-tertiary)' }}
               aria-label="Close"
             >

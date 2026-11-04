@@ -169,3 +169,104 @@ input:focus {
   from { opacity: 1; transform: scale(1) translateY(0); }
   to   { opacity: 0; transform: scale(0.95) translateY(8px); }
 }
+
+/* ══════════════════════════════════════════════════════════════
+   Mobile (phones such as iPhone 17 Pro, 402 × 874 CSS px)
+   Rules here are unlayered, so they win over Tailwind utilities.
+   ══════════════════════════════════════════════════════════════ */
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+}
+
+/* Space for the home indicator / rounded corners (viewport-fit=cover). */
+.safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
+.safe-top { padding-top: env(safe-area-inset-top); }
+.safe-x {
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+/* Toasts: bottom-right on desktop, full width above the home indicator on phones. */
+.toast-stack {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  pointer-events: none;
+}
+
+/* Dialogs: comfortable on desktop, edge-to-edge-ish on phones. */
+.modal-frame { padding: 24px; }
+.modal-card { padding: 24px; }
+
+@media (max-width: 767px) {
+  /* iOS Safari zooms into any focused field under 16px. */
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+
+  .toast-stack {
+    left: 12px;
+    right: 12px;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    align-items: stretch;
+  }
+  .toast-stack > * {
+    min-width: 0 !important;
+    max-width: none !important;
+  }
+
+  .modal-frame { padding: 12px; padding-top: calc(12px + env(safe-area-inset-top)); }
+  .modal-card { padding: 18px; margin-top: 0 !important; margin-bottom: 0 !important; }
+
+  /* Tables become one card per row: header hidden, each cell labelled. */
+  .stack-table,
+  .stack-table tbody,
+  .stack-table tr,
+  .stack-table td {
+    display: block;
+    width: 100%;
+  }
+  .stack-table thead { display: none; }
+  .stack-table tr { padding: 10px 0; }
+  .stack-table td {
+    padding: 5px 16px !important;
+    max-width: none !important;
+    text-align: left !important;
+  }
+  .stack-table td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-tertiary);
+  }
+  /* Short values sit on the label's line. */
+  .stack-table td.stack-inline {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .stack-table td.stack-inline::before { margin-bottom: 0; }
+  .stack-table td.stack-title { font-size: 15px; padding-top: 2px !important; }
+  .stack-table td.stack-hide { display: none; }
+  /* Bigger hit area for the text-link actions. */
+  .stack-table td button { padding-top: 6px; padding-bottom: 6px; }
+}

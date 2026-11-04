@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Providers } from "@/components/providers";
@@ -16,6 +16,17 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "ClawHuddle",
   description: "AI assistant for your team",
+  // "Add to Home Screen" on iPhone opens it full screen like an app.
+  appleWebApp: { capable: true, title: "ClawHuddle", statusBarStyle: "black-translucent" },
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  // Draw under the notch / home indicator; layouts pad with env(safe-area-inset-*).
+  viewportFit: "cover",
+  themeColor: "#0a0f1a",
+  colorScheme: "dark",
 };
 
 export default function RootLayout({

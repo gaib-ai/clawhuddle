@@ -229,7 +229,7 @@ function DashboardView() {
 
   return (
     <main className="flex-1 overflow-y-auto">
-      <div className="max-w-2xl mx-auto px-6 py-8 space-y-4">
+      <div className="max-w-2xl mx-auto px-4 py-5 md:px-6 md:py-8 space-y-4">
         {/* Instances */}
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>

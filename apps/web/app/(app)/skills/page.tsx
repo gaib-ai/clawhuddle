@@ -108,7 +108,7 @@ export default function UserSkillsPage() {
 
   return (
     <main className="flex-1 overflow-y-auto">
-      <div className="max-w-2xl mx-auto px-6 py-8">
+      <div className="max-w-2xl mx-auto px-4 py-5 md:px-6 md:py-8">
         <div className="flex items-center justify-between mb-1">
           <h1
             className="text-xl font-semibold tracking-tight"
@@ -214,11 +214,11 @@ export default function UserSkillsPage() {
                   </button>
 
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                       <span className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
                         {skill.name}
                       </span>
-                      <span className="text-xs font-mono" style={{ color: 'var(--text-tertiary)' }}>
+                      <span className="text-xs font-mono max-sm:hidden" style={{ color: 'var(--text-tertiary)' }}>
                         {skill.git_path ? skill.git_path.split('/').pop() : skill.path}
                       </span>
                       {badge && (
@@ -231,7 +231,7 @@ export default function UserSkillsPage() {
                       )}
                     </div>
                     {skill.description && (
-                      <p className="text-xs mt-0.5 truncate" style={{ color: 'var(--text-tertiary)' }}>
+                      <p className="text-xs mt-0.5 max-sm:line-clamp-2 sm:truncate" style={{ color: 'var(--text-tertiary)' }}>
                         {skill.description}
                       </p>
                     )}

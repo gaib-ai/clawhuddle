@@ -172,7 +172,7 @@ export default function PortForwardsPage() {
         className="rounded-xl p-5 mb-6 flex flex-wrap items-end gap-3"
         style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)' }}
       >
-        <div className="flex flex-col gap-1.5">
+        <div className="flex flex-col gap-1.5 basis-full sm:basis-auto">
           <label className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-tertiary)' }}>
             Instance
           </label>
@@ -180,7 +180,7 @@ export default function PortForwardsPage() {
             required
             value={gatewayId}
             onChange={(e) => setGatewayId(e.target.value)}
-            className="rounded-lg px-3 py-2 text-sm min-w-52"
+            className="rounded-lg px-3 py-2 text-sm w-full sm:w-auto sm:min-w-52"
             style={inputStyle}
           >
             <option value="">Select instance...</option>
@@ -201,10 +201,10 @@ export default function PortForwardsPage() {
               onChange={(e) => setSubdomain(e.target.value)}
               placeholder="my-service"
               pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?"
-              className="rounded-lg px-3 py-2 text-sm w-40"
+              className="rounded-lg px-3 py-2 text-sm w-36 sm:w-40 min-w-0"
               style={inputStyle}
             />
-            <span className="text-sm" style={{ color: 'var(--text-tertiary)' }}>.{gwDomain}</span>
+            <span className="text-sm break-all" style={{ color: 'var(--text-tertiary)' }}>.{gwDomain}</span>
           </div>
         </div>
 
@@ -241,7 +241,7 @@ export default function PortForwardsPage() {
         <button
           type="submit"
           disabled={submitting}
-          className="rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50"
+          className="rounded-lg px-4 py-2.5 sm:py-2 text-sm font-medium transition-colors disabled:opacity-50 max-sm:basis-full"
           style={{ background: 'var(--accent)', color: 'var(--text-inverse)' }}
         >
           {submitting ? 'Creating...' : 'Create'}
@@ -262,7 +262,7 @@ export default function PortForwardsPage() {
           className="rounded-xl overflow-hidden"
           style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)' }}
         >
-          <table className="w-full text-sm">
+          <table className="w-full text-sm stack-table">
             <thead>
               <tr style={{ borderBottom: '1px solid var(--border-primary)' }}>
                 {['URL', 'Instance', 'Port', 'Description', 'Created', 'Actions'].map((h) => (
@@ -283,7 +283,7 @@ export default function PortForwardsPage() {
                 if (isEditing) {
                   return (
                     <tr key={fw.id} style={{ borderBottom: rowBorder, background: 'var(--bg-hover)' }}>
-                      <td className="px-4 py-3">
+                      <td className="px-4 py-3" data-label="Subdomain">
                         <div className="flex items-center gap-1">
                           <input
                             value={edit.subdomain}
@@ -295,7 +295,7 @@ export default function PortForwardsPage() {
                           <span className="text-xs" style={{ color: 'var(--text-tertiary)' }}>.{gwDomain}</span>
                         </div>
                       </td>
-                      <td className="px-4 py-3">
+                      <td className="px-4 py-3" data-label="Instance">
                         <select
                           value={edit.gatewayId}
                           onChange={(e) => setEdit({ ...edit, gatewayId: e.target.value })}
@@ -308,7 +308,7 @@ export default function PortForwardsPage() {
                           ))}
                         </select>
                       </td>
-                      <td className="px-4 py-3">
+                      <td className="px-4 py-3" data-label="Port">
                         <input
                           type="number"
                           min={1}
@@ -319,7 +319,7 @@ export default function PortForwardsPage() {
                           style={inputStyle}
                         />
                       </td>
-                      <td className="px-4 py-3">
+                      <td className="px-4 py-3" data-label="Description">
                         <input
                           value={edit.description}
                           onChange={(e) => setEdit({ ...edit, description: e.target.value })}
@@ -328,7 +328,7 @@ export default function PortForwardsPage() {
                           style={inputStyle}
                         />
                       </td>
-                      <td className="px-4 py-3 text-xs" style={{ color: 'var(--text-tertiary)' }}>
+                      <td className="px-4 py-3 text-xs stack-hide" style={{ color: 'var(--text-tertiary)' }}>
                         {new Date(fw.created_at).toLocaleDateString()}
                       </td>
                       <td className="px-4 py-3">
@@ -337,7 +337,7 @@ export default function PortForwardsPage() {
                             saving...
                           </span>
                         ) : (
-                          <div className="flex items-center gap-3">
+                          <div className="flex items-center gap-x-4 md:gap-3">
                             <button
                               onClick={saveEdit}
                               className="text-xs font-medium"
@@ -366,7 +366,7 @@ export default function PortForwardsPage() {
                     onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
                     onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
                   >
-                    <td className="px-4 py-3">
+                    <td className="px-4 py-3 stack-title max-md:break-all">
                       <a
                         href={`${window.location.protocol}//${fw.hostname}`}
                         target="_blank"
@@ -377,18 +377,18 @@ export default function PortForwardsPage() {
                         {fw.hostname}
                       </a>
                     </td>
-                    <td className="px-4 py-3" style={{ color: 'var(--text-primary)' }}>
+                    <td className="px-4 py-3" data-label="Instance" style={{ color: 'var(--text-primary)' }}>
                       {fw.gateway_slot ? gatewayLabel({ label: fw.gateway_label, slot: fw.gateway_slot }) : 'Instance'}
                       <span className="ml-1 text-xs" style={{ color: 'var(--text-tertiary)' }}>· {fw.member_name || fw.member_email}</span>
                       {fw.gateway_status !== 'running' && (
                         <span className="ml-2 text-[11px]" style={{ color: 'var(--yellow)' }}>{fw.gateway_status ?? 'no gateway'}</span>
                       )}
                     </td>
-                    <td className="px-4 py-3" style={{ color: 'var(--text-primary)' }}>{fw.port}</td>
-                    <td className="px-4 py-3 text-xs" style={{ color: 'var(--text-tertiary)' }}>
+                    <td className="px-4 py-3 stack-inline" data-label="Port" style={{ color: 'var(--text-primary)' }}>{fw.port}</td>
+                    <td className="px-4 py-3 text-xs" data-label="Description" style={{ color: 'var(--text-tertiary)' }}>
                       {fw.description || '—'}
                     </td>
-                    <td className="px-4 py-3 text-xs" style={{ color: 'var(--text-tertiary)' }}>
+                    <td className="px-4 py-3 text-xs stack-inline" data-label="Created" style={{ color: 'var(--text-tertiary)' }}>
                       {new Date(fw.created_at).toLocaleDateString()}
                     </td>
                     <td className="px-4 py-3">
@@ -397,7 +397,7 @@ export default function PortForwardsPage() {
                           removing...
                         </span>
                       ) : (
-                        <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-x-4 md:gap-3">
                           <button
                             onClick={() => startEdit(fw)}
                             className="text-xs font-medium transition-colors"

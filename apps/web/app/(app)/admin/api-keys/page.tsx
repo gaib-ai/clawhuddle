@@ -103,7 +103,7 @@ export default function ApiKeysPage() {
         className="rounded-xl p-5 mb-6 max-w-lg"
         style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)' }}
       >
-        <div className="flex items-baseline justify-between mb-1">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 mb-1">
           <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
             Primary Provider
           </h3>
@@ -170,7 +170,7 @@ export default function ApiKeysPage() {
         className="rounded-xl p-5 mb-6 max-w-lg"
         style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)' }}
       >
-        <div className="flex items-baseline justify-between mb-1">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 mb-1">
           <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
             Instances per member
           </h3>

@@ -79,6 +79,19 @@ const icons = {
       <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
     </svg>
   ),
+  menu: (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="4" y1="7" x2="20" y2="7"/>
+      <line x1="4" y1="12" x2="20" y2="12"/>
+      <line x1="4" y1="17" x2="20" y2="17"/>
+    </svg>
+  ),
+  close: (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="18" y1="6" x2="6" y2="18"/>
+      <line x1="6" y1="6" x2="18" y2="18"/>
+    </svg>
+  ),
   signOut: (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
@@ -106,7 +119,7 @@ function NavItem({
   return (
     <Link
       href={href}
-      className="flex items-center gap-2.5 px-3 py-[7px] rounded-lg text-[13px] font-medium transition-colors"
+      className="flex items-center gap-3 md:gap-2.5 px-3 py-2.5 md:py-[7px] rounded-lg text-[15px] md:text-[13px] font-medium transition-colors"
       style={{
         color: active ? 'var(--accent-text)' : 'var(--text-secondary)',
         background: active ? 'var(--accent-muted)' : 'transparent',
@@ -154,7 +167,7 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
  * are counted (admins see the org-wide list on the page itself); polled
  * slowly since every poll runs a command in each running container.
  */
-function usePendingDeviceCount(): number {
+export function usePendingDeviceCount(): number {
   const { orgFetch } = useOrgFetch();
   const [count, setCount] = useState(0);
   useEffect(() => {
@@ -171,22 +184,90 @@ function usePendingDeviceCount(): number {
   return count;
 }
 
+/* ─── Mobile top bar (phones only; the sidebar is a drawer there) ─── */
+
+export function MobileTopBar({ onMenu, badge }: { onMenu: () => void; badge?: number }) {
+  const { currentOrg } = useOrg();
+  return (
+    <header
+      className="md:hidden shrink-0 safe-top"
+      style={{ background: 'var(--bg-primary)', borderBottom: '1px solid var(--border-subtle)' }}
+    >
+      <div className="h-14 flex items-center gap-1 px-2">
+        <button
+          onClick={onMenu}
+          aria-label="Open menu"
+          className="relative w-11 h-11 flex items-center justify-center rounded-lg"
+          style={{ color: 'var(--text-secondary)' }}
+        >
+          {icons.menu}
+          {badge ? (
+            <span
+              className="absolute top-2 right-2 w-2 h-2 rounded-full"
+              style={{ background: 'var(--accent)', boxShadow: '0 0 0 2px var(--bg-primary)' }}
+            />
+          ) : null}
+        </button>
+        <Link
+          href="/home"
+          className="flex items-center gap-2 font-semibold text-[16px] tracking-tight"
+          style={{ color: 'var(--accent)' }}
+        >
+          <ClawHuddleLogo size={20} />
+          ClawHuddle
+        </Link>
+        {currentOrg?.name && (
+          <span className="ml-auto pr-2 text-xs truncate max-w-[40%]" style={{ color: 'var(--text-tertiary)' }}>
+            {currentOrg.name}
+          </span>
+        )}
+      </div>
+    </header>
+  );
+}
+
 /* ─── Sidebar ─── */
 
-export function AppSidebar() {
+/**
+ * Static column from md up. Below that it is an off-canvas drawer opened from
+ * MobileTopBar; the layout closes it on navigation.
+ */
+export function AppSidebar({
+  mobileOpen = false,
+  onClose,
+  pendingDevices = 0,
+}: {
+  mobileOpen?: boolean;
+  onClose?: () => void;
+  pendingDevices?: number;
+}) {
   const pathname = usePathname();
   const { data: session } = useSession();
   const { currentOrgId, memberRole } = useOrg();
   const isAdmin = memberRole === 'admin' || memberRole === 'owner';
   const isSuperAdmin = useSuperAdmin();
-  const pendingDevices = usePendingDeviceCount();
 
   return (
+    <>
+    {/* Backdrop (phones, drawer open) */}
+    {mobileOpen && (
+      <div
+        className="md:hidden fixed inset-0 z-40"
+        style={{ background: 'rgba(0, 0, 0, 0.55)', backdropFilter: 'blur(2px)', animation: 'fade-in 0.15s ease-out' }}
+        onClick={onClose}
+        aria-hidden
+      />
+    )}
     <aside
-      className="w-56 flex flex-col shrink-0"
+      className={`flex flex-col shrink-0 fixed inset-y-0 left-0 z-50 w-[17.5rem] max-w-[85vw] transition-[transform,visibility] duration-200 ease-out md:static md:z-auto md:w-56 md:max-w-none md:translate-x-0 md:visible md:transition-none ${
+        mobileOpen ? 'translate-x-0 visible shadow-2xl' : '-translate-x-full invisible'
+      }`}
       style={{
         background: 'var(--bg-primary)',
         borderRight: '1px solid var(--border-subtle)',
+        paddingTop: 'env(safe-area-inset-top)',
+        paddingBottom: 'env(safe-area-inset-bottom)',
+        paddingLeft: 'env(safe-area-inset-left)',
       }}
     >
       {/* Logo + Org */}
@@ -194,14 +275,24 @@ export function AppSidebar() {
         className="px-4 py-4"
         style={{ borderBottom: '1px solid var(--border-subtle)' }}
       >
-        <Link
-          href="/home"
-          className="flex items-center gap-2 font-semibold text-[15px] tracking-tight mb-3"
-          style={{ color: 'var(--accent)' }}
-        >
-          <ClawHuddleLogo size={18} />
-          ClawHuddle
-        </Link>
+        <div className="flex items-center justify-between mb-3">
+          <Link
+            href="/home"
+            className="flex items-center gap-2 font-semibold text-[15px] tracking-tight"
+            style={{ color: 'var(--accent)' }}
+          >
+            <ClawHuddleLogo size={18} />
+            ClawHuddle
+          </Link>
+          <button
+            onClick={onClose}
+            aria-label="Close menu"
+            className="md:hidden -mr-2 w-10 h-10 flex items-center justify-center rounded-lg"
+            style={{ color: 'var(--text-tertiary)' }}
+          >
+            {icons.close}
+          </button>
+        </div>
         <OrgSwitcher />
       </div>
 
@@ -250,7 +341,7 @@ export function AppSidebar() {
 
         <button
           onClick={() => signOut({ callbackUrl: '/login' })}
-          className="w-full flex items-center gap-2.5 px-3 py-[7px] rounded-lg text-[13px] font-medium transition-colors"
+          className="w-full flex items-center gap-3 md:gap-2.5 px-3 py-2.5 md:py-[7px] rounded-lg text-[15px] md:text-[13px] font-medium transition-colors"
           style={{ color: 'var(--text-tertiary)', background: 'transparent' }}
           onMouseEnter={(e) => {
             e.currentTarget.style.background = 'var(--bg-hover)';
@@ -284,5 +375,6 @@ export function AppSidebar() {
         </div>
       </div>
     </aside>
+    </>
   );
 }

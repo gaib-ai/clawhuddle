@@ -67,7 +67,7 @@ export default function MyApiKeysPage() {
 
   if (loading || !ready) {
     return (
-      <div className="flex-1 overflow-y-auto scrollbar-hide p-8 max-w-3xl mx-auto w-full">
+      <div className="flex-1 overflow-y-auto scrollbar-hide p-4 md:p-8 max-w-3xl mx-auto w-full">
         <h1 className="text-xl font-semibold tracking-tight mb-6" style={{ color: 'var(--text-primary)' }}>
           My API Keys
         </h1>
@@ -77,7 +77,7 @@ export default function MyApiKeysPage() {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto scrollbar-hide p-8 max-w-3xl mx-auto w-full">
+    <div className="flex-1 overflow-y-auto scrollbar-hide p-4 md:p-8 max-w-3xl mx-auto w-full">
       <h1 className="text-xl font-semibold tracking-tight mb-2" style={{ color: 'var(--text-primary)' }}>
         My API Keys
       </h1>
@@ -89,7 +89,7 @@ export default function MyApiKeysPage() {
         className="rounded-xl p-5 mb-6 max-w-lg"
         style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)' }}
       >
-        <div className="flex items-baseline justify-between mb-1">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 mb-1">
           <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
             Primary Model Provider
           </h3>

@@ -28,12 +28,12 @@ function AuthErrorContent() {
 
   return (
     <div
-      className="min-h-screen flex items-center justify-center"
+      className="min-h-dvh flex items-center justify-center"
       style={{ background: 'var(--bg-base)' }}
     >
       {/* Ambient glow */}
       <div
-        className="fixed top-0 left-1/2 -translate-x-1/2 w-[600px] h-[400px] pointer-events-none"
+        className="fixed top-0 left-1/2 -translate-x-1/2 w-[min(600px,100vw)] h-[400px] pointer-events-none"
         style={{
           background: 'radial-gradient(ellipse at center, rgba(255, 77, 77, 0.06) 0%, transparent 70%)',
         }}

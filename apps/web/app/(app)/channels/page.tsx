@@ -68,7 +68,7 @@ function PairingSection({ gatewayId, channelId, orgFetch }: { gatewayId: string;
             value={pairingCode}
             onChange={(e) => setPairingCode(e.target.value.toUpperCase())}
             placeholder="e.g. SAXMVEC7"
-            className="flex-1 px-3 py-1.5 text-sm rounded-lg font-mono uppercase tracking-wider"
+            className="flex-1 min-w-0 px-3 py-1.5 text-sm rounded-lg font-mono uppercase tracking-wider"
             style={{
               background: 'var(--bg-primary)',
               border: '1px solid var(--border-primary)',
@@ -183,7 +183,7 @@ export default function ChannelsPage() {
 
   return (
     <main className="flex-1 overflow-y-auto">
-      <div className="max-w-2xl mx-auto px-6 py-8">
+      <div className="max-w-2xl mx-auto px-4 py-5 md:px-6 md:py-8">
         <h1
           className="text-xl font-semibold tracking-tight mb-1"
           style={{ color: 'var(--text-primary)' }}
@@ -243,13 +243,13 @@ export default function ChannelsPage() {
                   onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border-subtle)'; }}
                 >
                   {/* Channel header row */}
-                  <div className="flex items-center gap-4 px-4 py-3">
+                  <div className="flex items-center gap-3 sm:gap-4 px-4 py-3">
                     <span style={{ color: config?.configured ? 'var(--accent)' : 'var(--text-tertiary)' }}>
                       {ch.icon}
                     </span>
 
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                         <span className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
                           {ch.label}
                         </span>
@@ -269,7 +269,7 @@ export default function ChannelsPage() {
                           </span>
                         )}
                       </div>
-                      <p className="text-xs mt-0.5" style={{ color: 'var(--text-tertiary)' }}>
+                      <p className="text-xs mt-0.5 break-all" style={{ color: 'var(--text-tertiary)' }}>
                         {config?.configured
                           ? `Token: ${config.masked_token}`
                           : ch.description}
@@ -337,7 +337,7 @@ export default function ChannelsPage() {
                           value={tokenInput}
                           onChange={(e) => setTokenInput(e.target.value)}
                           placeholder={ch.placeholder}
-                          className="flex-1 px-3 py-2 text-sm rounded-lg font-mono"
+                          className="flex-1 min-w-0 px-3 py-2 text-sm rounded-lg font-mono"
                           style={{
                             background: 'var(--bg-secondary)',
                             border: '1px solid var(--border-primary)',

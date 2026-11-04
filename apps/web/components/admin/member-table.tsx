@@ -305,7 +305,7 @@ export function MemberTable({ initialMembers }: Props) {
 
     if (gateway.status === 'deploying' || gateway.status === 'provisioning') {
       return (
-        <span className="flex gap-3 items-center">
+        <span className="flex flex-wrap gap-x-4 gap-y-1 md:gap-3 items-center">
           <span className="text-xs" style={{ color: 'var(--blue)' }}>starting up...</span>
           <ActionBtn onClick={() => gatewayAction(gateway, 'stop')}>Stop</ActionBtn>
           <ActionBtn onClick={() => gatewayAction(gateway, 'remove')} color="danger">Remove</ActionBtn>
@@ -315,7 +315,7 @@ export function MemberTable({ initialMembers }: Props) {
 
     if (gateway.status === 'running') {
       return (
-        <span className="flex gap-3">
+        <span className="flex flex-wrap gap-x-4 gap-y-1 md:gap-3">
           {canOpenGateway(member) && (
             <ActionBtn onClick={() => openGateway(gateway)} color="success">Open</ActionBtn>
           )}
@@ -327,7 +327,7 @@ export function MemberTable({ initialMembers }: Props) {
     }
 
     return (
-      <span className="flex gap-3">
+      <span className="flex flex-wrap gap-x-4 gap-y-1 md:gap-3">
         <ActionBtn onClick={() => gatewayAction(gateway, 'start')} color="success">Start</ActionBtn>
         <ActionBtn onClick={() => gatewayAction(gateway, 'redeploy')}>Redeploy</ActionBtn>
         <ActionBtn onClick={() => gatewayAction(gateway, 'remove')} color="danger">Remove</ActionBtn>
@@ -393,18 +393,18 @@ export function MemberTable({ initialMembers }: Props) {
   return (
     <div>
       {/* Invite form */}
-      <div className="flex items-center gap-2 mb-4">
+      <div className="flex flex-wrap items-center gap-2 mb-4">
         <input
           type="email"
           value={inviteEmail}
           onChange={(e) => { setInviteEmail(e.target.value); setLimitHit(false); }}
           placeholder="employee@company.com"
-          className="flex-1 max-w-sm px-3 py-2 text-sm rounded-lg"
+          className="basis-full sm:basis-auto flex-1 min-w-0 sm:max-w-sm px-3 py-2.5 sm:py-2 text-sm rounded-lg"
         />
         <button
           onClick={invite}
           disabled={inviting}
-          className="px-4 py-2 rounded-lg text-sm font-medium transition-all disabled:opacity-50"
+          className="px-4 py-2.5 sm:py-2 rounded-lg text-sm font-medium transition-all disabled:opacity-50"
           style={{
             background: 'var(--accent)',
             color: 'var(--text-inverse)',
@@ -421,7 +421,7 @@ export function MemberTable({ initialMembers }: Props) {
           <button
             onClick={redeployAll}
             disabled={redeployingAll}
-            className="ml-auto px-3 py-2 rounded-lg text-xs font-medium transition-all disabled:opacity-50"
+            className="ml-auto px-3 py-2.5 sm:py-2 rounded-lg text-xs font-medium transition-all disabled:opacity-50"
             style={{
               background: 'var(--bg-tertiary)',
               color: 'var(--text-secondary)',
@@ -476,7 +476,7 @@ export function MemberTable({ initialMembers }: Props) {
       {/* Invite link */}
       {inviteLink && (
         <div
-          className="flex items-center gap-2 mb-6 px-4 py-3 rounded-lg text-sm"
+          className="flex items-center gap-2 mb-6 px-4 py-3 rounded-lg text-sm min-w-0"
           style={{ background: 'var(--green-muted)', border: '1px solid rgba(74, 199, 120, 0.2)' }}
         >
           <span className="flex-1 font-mono text-xs truncate" style={{ color: 'var(--text-primary)' }}>
@@ -510,7 +510,7 @@ export function MemberTable({ initialMembers }: Props) {
           border: '1px solid var(--border-subtle)',
         }}
       >
-        <table className="w-full text-sm">
+        <table className="w-full text-sm stack-table">
           <thead>
             <tr style={{ borderBottom: '1px solid var(--border-primary)' }}>
               {['Name', 'Email', 'Role', 'Status', 'Gateways', 'Max', 'Member'].map((h) => (
@@ -535,13 +535,19 @@ export function MemberTable({ initialMembers }: Props) {
                 onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
                 onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
               >
-                <td className="px-4 py-3 font-medium" style={{ color: 'var(--text-primary)' }}>
-                  {member.name || '\u2014'}
+                <td className="px-4 py-3 font-medium stack-title max-md:break-all" style={{ color: 'var(--text-primary)' }}>
+                  {member.name || (
+                    <>
+                      <span className="md:hidden">{member.email}</span>
+                      <span className="hidden md:inline">{'\u2014'}</span>
+                    </>
+                  )}
                 </td>
-                <td className="px-4 py-3" style={{ color: 'var(--text-secondary)' }}>
+                {/* On phones the email is the card's subtitle, or its title when there is no name. */}
+                <td className={`px-4 py-3 max-md:break-all max-md:text-xs ${member.name ? '' : 'stack-hide'}`} style={{ color: 'var(--text-secondary)' }}>
                   {member.email}
                 </td>
-                <td className="px-4 py-3">
+                <td className="px-4 py-3 stack-inline" data-label="Role">
                   {member.user_id !== userId &&
                   (memberRole === 'owner' || (memberRole === 'admin' && member.role !== 'owner')) ? (
                     <select
@@ -570,15 +576,15 @@ export function MemberTable({ initialMembers }: Props) {
                     </Badge>
                   )}
                 </td>
-                <td className="px-4 py-3">
+                <td className="px-4 py-3 stack-inline" data-label="Status">
                   <Badge color={member.status === 'active' ? 'green' : 'red'}>
                     {member.status}
                   </Badge>
                 </td>
-                <td className="px-4 py-3">
+                <td className="px-4 py-3" data-label="Gateways">
                   {gatewayCell(member)}
                 </td>
-                <td className="px-4 py-3">
+                <td className="px-4 py-3 stack-inline" data-label="Max instances">
                   <input
                     type="number"
                     min={1}
@@ -592,8 +598,8 @@ export function MemberTable({ initialMembers }: Props) {
                     style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
                   />
                 </td>
-                <td className="px-4 py-3">
-                  <div className="flex items-center gap-3">
+                <td className="px-4 py-3" data-label="Member">
+                  <div className="flex flex-wrap md:flex-nowrap items-center gap-x-4 gap-y-1 md:gap-3">
                     <ActionBtn onClick={() => setApiKeysMember(member)}>
                       API Keys
                     </ActionBtn>

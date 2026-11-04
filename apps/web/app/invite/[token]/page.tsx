@@ -63,7 +63,7 @@ export default function InvitePage() {
 
   if (loading || authStatus === 'loading') {
     return (
-      <div className="min-h-screen flex items-center justify-center" style={{ background: 'var(--bg-base)' }}>
+      <div className="min-h-dvh flex items-center justify-center" style={{ background: 'var(--bg-base)' }}>
         <div
           className="w-8 h-8 rounded-full border-2 animate-spin"
           style={{ borderColor: 'var(--border-primary)', borderTopColor: 'var(--accent)' }}
@@ -74,7 +74,7 @@ export default function InvitePage() {
 
   if (error && !invite) {
     return (
-      <div className="min-h-screen flex items-center justify-center" style={{ background: 'var(--bg-base)' }}>
+      <div className="min-h-dvh flex items-center justify-center" style={{ background: 'var(--bg-base)' }}>
         <div className="text-center max-w-sm p-8">
           <h1 className="text-xl font-semibold mb-2" style={{ color: 'var(--text-primary)' }}>
             Invalid Invitation
@@ -86,7 +86,7 @@ export default function InvitePage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center" style={{ background: 'var(--bg-base)' }}>
+    <div className="min-h-dvh flex items-center justify-center" style={{ background: 'var(--bg-base)' }}>
       <div className="max-w-sm w-full p-8">
         <div className="text-center mb-8">
           <div

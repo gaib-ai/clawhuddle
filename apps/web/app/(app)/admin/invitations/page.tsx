@@ -105,7 +105,7 @@ export default function InvitationsPage() {
           className="rounded-xl overflow-hidden"
           style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)' }}
         >
-          <table className="w-full text-sm">
+          <table className="w-full text-sm stack-table">
             <thead>
               <tr style={{ borderBottom: '1px solid var(--border-primary)' }}>
                 {['Email', 'Status', 'Created', 'Actions'].map((h) => (
@@ -132,10 +132,10 @@ export default function InvitationsPage() {
                     onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
                     onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
                   >
-                    <td className="px-4 py-3" style={{ color: 'var(--text-primary)' }}>
+                    <td className="px-4 py-3 stack-title max-md:break-all" style={{ color: 'var(--text-primary)' }}>
                       {inv.email}
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="px-4 py-3 stack-inline" data-label="Status">
                       <span
                         className="inline-flex px-2 py-0.5 rounded text-[11px] font-medium"
                         style={{
@@ -146,7 +146,7 @@ export default function InvitationsPage() {
                         {inv.status}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-xs" style={{ color: 'var(--text-tertiary)' }}>
+                    <td className="px-4 py-3 text-xs stack-inline" data-label="Created" style={{ color: 'var(--text-tertiary)' }}>
                       {new Date(inv.created_at).toLocaleDateString()}
                     </td>
                     <td className="px-4 py-3">
@@ -155,7 +155,7 @@ export default function InvitationsPage() {
                           working...
                         </span>
                       ) : (
-                        <div className="flex items-center gap-3">
+                        <div className="flex flex-wrap md:flex-nowrap items-center gap-x-4 gap-y-1 md:gap-3">
                           <ActionBtn onClick={() => copyLink(inv.token)}>Copy Link</ActionBtn>
                           <ActionBtn onClick={() => resendInvitation(inv)}>Resend</ActionBtn>
                           <ActionBtn onClick={() => cancelInvitation(inv.id)} color="danger">Cancel</ActionBtn>

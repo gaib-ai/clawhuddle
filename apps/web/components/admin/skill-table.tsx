@@ -207,7 +207,7 @@ export function SkillTable({ initialSkills, fetchFn }: Props) {
 
           {/* Step 1: Scan */}
           <div className="flex gap-3 mb-3">
-            <div className="flex-1">
+            <div className="flex-1 min-w-0">
               <label className="block text-[11px] font-medium mb-1 uppercase tracking-wider" style={{ color: 'var(--text-tertiary)' }}>
                 Repository URL
               </label>
@@ -310,7 +310,7 @@ export function SkillTable({ initialSkills, fetchFn }: Props) {
           border: '1px solid var(--border-subtle)',
         }}
       >
-        <table className="w-full text-sm">
+        <table className="w-full text-sm stack-table">
           <thead>
             <tr style={{ borderBottom: '1px solid var(--border-primary)' }}>
               {['Name', 'Git URL', 'Git Path', 'Type', 'Status', 'Actions'].map((h) => (
@@ -335,7 +335,7 @@ export function SkillTable({ initialSkills, fetchFn }: Props) {
                 onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
                 onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
               >
-                <td className="px-4 py-3" style={{ color: 'var(--text-primary)' }}>
+                <td className="px-4 py-3 stack-title" style={{ color: 'var(--text-primary)' }}>
                   <div className="font-medium">{skill.name}</div>
                   {skill.description && (
                     <div className="text-xs mt-0.5" style={{ color: 'var(--text-tertiary)' }}>
@@ -343,13 +343,13 @@ export function SkillTable({ initialSkills, fetchFn }: Props) {
                     </div>
                   )}
                 </td>
-                <td className="px-4 py-3 font-mono text-xs max-w-[200px] truncate" style={{ color: 'var(--text-secondary)' }} title={skill.git_url || ''}>
+                <td data-label="Git URL" className="px-4 py-3 font-mono text-xs max-w-[200px] truncate" style={{ color: 'var(--text-secondary)' }} title={skill.git_url || ''}>
                   {skill.git_url || '-'}
                 </td>
-                <td className="px-4 py-3 font-mono text-xs" style={{ color: 'var(--text-secondary)' }}>
+                <td data-label="Path" className="px-4 py-3 font-mono text-xs max-md:break-all" style={{ color: 'var(--text-secondary)' }}>
                   {skill.git_path || skill.path}
                 </td>
-                <td className="px-4 py-3">
+                <td className="px-4 py-3 stack-inline" data-label="Type">
                   <select
                     value={skill.type}
                     onChange={(e) => changeType(skill, e.target.value)}
@@ -364,12 +364,12 @@ export function SkillTable({ initialSkills, fetchFn }: Props) {
                     <option value="restricted">restricted</option>
                   </select>
                 </td>
-                <td className="px-4 py-3">
+                <td className="px-4 py-3 stack-inline" data-label="Status">
                   <Badge color={skill.enabled ? 'green' : 'gray'}>
                     {skill.enabled ? 'enabled' : 'disabled'}
                   </Badge>
                 </td>
-                <td className="px-4 py-3 space-x-3">
+                <td className="px-4 py-3 space-x-4 md:space-x-3">
                   <ActionBtn onClick={() => toggleEnabled(skill)}>
                     {skill.enabled ? 'Disable' : 'Enable'}
                   </ActionBtn>

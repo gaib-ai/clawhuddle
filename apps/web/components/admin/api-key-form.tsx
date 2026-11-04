@@ -247,7 +247,7 @@ export function ApiKeyForm({ initialKeys, fetchFn, scope = 'org', summary, onMut
               border: '1px solid var(--border-subtle)',
             }}
           >
-            <div className="flex items-baseline justify-between mb-1">
+            <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 mb-1">
               <div className="flex items-center gap-2">
                 <h3
                   className="text-sm font-semibold"
@@ -386,7 +386,7 @@ export function ApiKeyForm({ initialKeys, fetchFn, scope = 'org', summary, onMut
               const existing = providerKeys[0];
               if (!existing) return null;
               return (
-                <div className="flex items-center gap-2 mb-3">
+                <div className="flex flex-wrap items-center gap-2 mb-3">
                   <span
                     className="text-[10px] font-medium px-1.5 py-0.5 rounded"
                     style={{
@@ -493,7 +493,7 @@ export function ApiKeyForm({ initialKeys, fetchFn, scope = 'org', summary, onMut
                   onChange={(e) => setInputs((prev) => ({ ...prev, [id]: e.target.value }))}
                   placeholder={isOAuthClient ? placeholder : '{"access_token": "...", "refresh_token": "...", "expires_at": "..."}'}
                   rows={3}
-                  className="flex-1 px-3 py-2 text-xs font-mono rounded-lg resize-none"
+                  className="flex-1 min-w-0 px-3 py-2 text-xs font-mono rounded-lg resize-none"
                 />
               ) : (
                 <input
@@ -503,13 +503,13 @@ export function ApiKeyForm({ initialKeys, fetchFn, scope = 'org', summary, onMut
                   placeholder={
                     activeTab === 'token' ? 'Paste setup token...' : placeholder
                   }
-                  className="flex-1 px-3 py-2 text-sm rounded-lg"
+                  className="flex-1 min-w-0 px-3 py-2 text-sm rounded-lg"
                 />
               )}
               <button
                 onClick={() => saveKey(id)}
                 disabled={saving}
-                className="px-4 py-2 rounded-lg text-sm font-medium transition-all disabled:opacity-50 self-end"
+                className="px-4 py-2.5 sm:py-2 rounded-lg text-sm font-medium transition-all disabled:opacity-50 self-end"
                 style={{
                   background: 'var(--accent)',
                   color: 'var(--text-inverse)',

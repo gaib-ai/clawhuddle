@@ -125,7 +125,7 @@ export default function SuperAdminPage() {
 
   if (loading) {
     return (
-      <div className="flex-1 p-8 max-w-4xl mx-auto w-full">
+      <div className="flex-1 p-4 md:p-8 max-w-4xl mx-auto w-full">
         <h1 className="text-lg font-semibold mb-6" style={{ color: 'var(--text-primary)' }}>
           Super Admin
         </h1>
@@ -135,7 +135,7 @@ export default function SuperAdminPage() {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto p-8 max-w-4xl mx-auto w-full">
+    <div className="flex-1 overflow-y-auto p-4 md:p-8 max-w-4xl mx-auto w-full">
       <h1 className="text-lg font-semibold mb-1" style={{ color: 'var(--text-primary)' }}>
         Super Admin
       </h1>
@@ -155,7 +155,7 @@ export default function SuperAdminPage() {
       </p>
 
       {/* Add rule form */}
-      <div className="flex gap-2 mb-4">
+      <div className="flex flex-wrap sm:flex-nowrap gap-2 mb-4">
         <select
           value={ruleType}
           onChange={(e) => setRuleType(e.target.value as 'domain' | 'email')}
@@ -175,7 +175,7 @@ export default function SuperAdminPage() {
           onChange={(e) => setRuleValue(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') addRule(); }}
           placeholder={ruleType === 'domain' ? 'company.com' : 'user@example.com'}
-          className="flex-1 px-3 py-1.5 rounded text-sm"
+          className="flex-1 min-w-0 px-3 py-1.5 rounded text-sm"
           style={{
             background: 'var(--bg-secondary)',
             color: 'var(--text-primary)',
@@ -204,7 +204,7 @@ export default function SuperAdminPage() {
             border: '1px solid var(--border-subtle)',
           }}
         >
-          <table className="w-full text-sm">
+          <table className="w-full text-sm stack-table">
             <thead>
               <tr style={{ borderBottom: '1px solid var(--border-primary)' }}>
                 {['Type', 'Value', 'Added', ''].map((h, i) => (
@@ -229,7 +229,7 @@ export default function SuperAdminPage() {
                   onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
                   onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
                 >
-                  <td className="px-4 py-3">
+                  <td className="px-4 py-3 stack-inline" data-label="Type">
                     <span
                       className="inline-block px-2 py-0.5 rounded text-[11px] font-medium uppercase"
                       style={{
@@ -240,10 +240,10 @@ export default function SuperAdminPage() {
                       {rule.type}
                     </span>
                   </td>
-                  <td className="px-4 py-3 font-mono text-xs" style={{ color: 'var(--text-primary)' }}>
+                  <td className="px-4 py-3 font-mono text-xs max-md:break-all" data-label="Value" style={{ color: 'var(--text-primary)' }}>
                     {rule.value}
                   </td>
-                  <td className="px-4 py-3 text-xs" style={{ color: 'var(--text-tertiary)' }}>
+                  <td className="px-4 py-3 text-xs stack-inline" data-label="Added" style={{ color: 'var(--text-tertiary)' }}>
                     {new Date(rule.created_at).toLocaleDateString()}
                   </td>
                   <td className="px-4 py-3 text-right">
@@ -286,7 +286,7 @@ export default function SuperAdminPage() {
           border: '1px solid var(--border-subtle)',
         }}
       >
-        <table className="w-full text-sm">
+        <table className="w-full text-sm stack-table">
           <thead>
             <tr style={{ borderBottom: '1px solid var(--border-primary)' }}>
               {['Organization', 'Slug', 'Members', 'Created', ''].map((h, i) => (
@@ -311,16 +311,16 @@ export default function SuperAdminPage() {
                 onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
                 onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
               >
-                <td className="px-4 py-3 font-medium" style={{ color: 'var(--text-primary)' }}>
+                <td className="px-4 py-3 font-medium stack-title" style={{ color: 'var(--text-primary)' }}>
                   {org.name}
                 </td>
-                <td className="px-4 py-3 font-mono text-xs" style={{ color: 'var(--text-secondary)' }}>
+                <td className="px-4 py-3 font-mono text-xs stack-inline" data-label="Slug" style={{ color: 'var(--text-secondary)' }}>
                   {org.slug}
                 </td>
-                <td className="px-4 py-3 tabular-nums" style={{ color: 'var(--text-secondary)' }}>
+                <td className="px-4 py-3 tabular-nums stack-inline" data-label="Members" style={{ color: 'var(--text-secondary)' }}>
                   {org.member_count}
                 </td>
-                <td className="px-4 py-3 text-xs" style={{ color: 'var(--text-tertiary)' }}>
+                <td className="px-4 py-3 text-xs stack-inline" data-label="Created" style={{ color: 'var(--text-tertiary)' }}>
                   {new Date(org.created_at).toLocaleDateString()}
                 </td>
                 <td className="px-4 py-3 text-right">
