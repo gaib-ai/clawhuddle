@@ -258,6 +258,12 @@ export interface ProviderConfig {
   agentRuntime?: string;
   /** Available models the user can choose from */
   models?: ModelOption[];
+  /**
+   * Model ids no longer offered in `models` but still recognised, so an
+   * instance or org already pinned to one keeps that pin (providerForModel)
+   * instead of silently falling back to the provider default.
+   */
+  retiredModels?: string[];
   /** Whether this provider supports setup tokens (e.g. `claude setup-token`) */
   supportsSetupToken?: boolean;
   /** Instructions shown in UI for obtaining a setup token */
@@ -306,8 +312,16 @@ export const PROVIDERS: ProviderConfig[] = [
     // already pinned to one keeps working.
     models: [
       { id: 'tokenkiosk/azure/gpt-5.5', label: 'GPT-5.5' },
-      { id: 'tokenkiosk/claude-sonnet-latest', label: 'Claude Sonnet (latest)' },
+      { id: 'tokenkiosk/claude-sonnet-5', label: 'Claude Sonnet 5' },
       { id: 'tokenkiosk/minimax-m3.1-flash', label: 'MiniMax M3.1 Flash' },
+    ],
+    // Still declared by the generator; Sonnet (latest) left the list 2026-11-04.
+    retiredModels: [
+      'tokenkiosk/claude-sonnet-latest',
+      'tokenkiosk/claude-opus-latest',
+      'tokenkiosk/azure/gpt-5.6-sol',
+      'tokenkiosk/bedrock/kimi-k2.5',
+      'tokenkiosk/bedrock/kimi-k2-thinking',
     ],
   },
   {
@@ -433,7 +447,10 @@ export const MODEL_IDS = PROVIDERS.flatMap((p) => (p.models ?? []).map((m) => m.
  * openai-codex provider), so this goes through the catalog, not the prefix.
  */
 export function providerForModel(modelId: string): ProviderConfig | undefined {
-  return PROVIDERS.find((p) => p.models?.some((m) => m.id === modelId));
+  return (
+    PROVIDERS.find((p) => p.models?.some((m) => m.id === modelId)) ??
+    PROVIDERS.find((p) => p.retiredModels?.includes(modelId))
+  );
 }
 
 export interface SetApiKeyRequest {

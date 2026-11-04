@@ -33,24 +33,30 @@ describe('default model', () => {
     expect(cfg.agents!.defaults.model.primary).toBe('google/gemini-3.8-flash');
   });
 
+  it('a pin to a retired model keeps working (no longer offered, still declared)', () => {
+    const cfg = generateOpenClawConfig({ ...base, primaryProviderId: 'google', primaryModel: 'tokenkiosk/claude-sonnet-latest' });
+    expect(cfg.agents!.defaults.model.primary).toBe('tokenkiosk/claude-sonnet-latest');
+    expect(cfg.models!.providers.tokenkiosk!.models!.map((m) => m.id)).toContain('claude-sonnet-latest');
+  });
+
   it('a pinned model beats the provider pin and the key override', () => {
     const cfg = generateOpenClawConfig({
       ...base,
       primaryProviderId: 'google',
       modelOverrides: { google: 'google/gemini-3.8-flash' },
-      primaryModel: 'tokenkiosk/claude-sonnet-latest',
+      primaryModel: 'tokenkiosk/claude-sonnet-5',
     });
     const defaults = cfg.agents!.defaults;
-    expect(defaults.model.primary).toBe('tokenkiosk/claude-sonnet-latest');
+    expect(defaults.model.primary).toBe('tokenkiosk/claude-sonnet-5');
     expect(defaults.model.fallbacks).toEqual(['google/gemini-3.8-flash']);
-    expect(defaults.modelPolicy!.allow).toContain('tokenkiosk/claude-sonnet-latest');
-    expect(cfg.models!.providers.tokenkiosk!.models!.map((m) => m.id)).toContain('claude-sonnet-latest');
+    expect(defaults.modelPolicy!.allow).toContain('tokenkiosk/claude-sonnet-5');
+    expect(cfg.models!.providers.tokenkiosk!.models!.map((m) => m.id)).toContain('claude-sonnet-5');
   });
 
   it('loads every catalog model of the active providers so members can switch inside OpenClaw', () => {
     const defaults = generateOpenClawConfig({ ...base, primaryProviderId: 'google' }).agents!.defaults;
     const loaded = Object.keys(defaults.models);
-    for (const id of ['google/gemini-3.8-flash', 'google/gemini-4-argon', 'tokenkiosk/azure/gpt-5.5', 'tokenkiosk/claude-sonnet-latest', 'tokenkiosk/minimax-m3.1-flash']) {
+    for (const id of ['google/gemini-3.8-flash', 'google/gemini-4-argon', 'tokenkiosk/azure/gpt-5.5', 'tokenkiosk/claude-sonnet-5', 'tokenkiosk/minimax-m3.1-flash']) {
       expect(loaded).toContain(id);
     }
     expect(loaded[0]).toBe('google/gemini-3.8-flash');

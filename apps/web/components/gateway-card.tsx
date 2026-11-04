@@ -101,7 +101,11 @@ export function GatewayCard({ gateway, orgFetch, onChanged, activeProviders }: P
     toast('Model updated. Restart this instance for the change to take effect.', 'success');
   };
 
-  const primaryBtn = (label: string, onClick: () => void, disabled = false) => (
+  const pinnedProvider = gateway.primary_model ? providerForModel(gateway.primary_model)?.id ?? '' : '';
+  const hasKey = activeProviders.includes(pinnedProvider);
+  const offered = hasKey && PROVIDERS.some((p) => p.id === pinnedProvider && p.models?.some((m) => m.id === gateway.primary_model));
+
+  const primaryBtn = (label: string, onClick: () => void, disabled = false, extra = '') => (
     <button
       onClick={onClick}
       disabled={disabled || !!busy}
@@ -215,9 +219,12 @@ export function GatewayCard({ gateway, orgFetch, onChanged, activeProviders }: P
             style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-subtle)' }}
           >
             <option value="">Follow my default</option>
-            {/* A pinned model whose key has since gone stays visible so the pick is not silently lost. */}
-            {gateway.primary_model && !activeProviders.includes(providerForModel(gateway.primary_model)?.id ?? '') && (
-              <option value={gateway.primary_model}>{gateway.primary_model} (no key)</option>
+            {/* A pinned model that is no longer offered (key gone, or dropped from the
+                pick-list) stays visible so the pick is not silently shown as the default. */}
+            {gateway.primary_model && !offered && (
+              <option value={gateway.primary_model}>
+                {gateway.primary_model.replace(/^tokenkiosk\//, '')}{hasKey ? '' : ' (no key)'}
+              </option>
             )}
             {PROVIDERS.filter((p) => p.models?.length && activeProviders.includes(p.id)).map((p) => (
               <optgroup key={p.id} label={p.label}>

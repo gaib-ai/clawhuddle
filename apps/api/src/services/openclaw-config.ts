@@ -413,6 +413,10 @@ export function generateOpenClawConfig(options: {
         // Rolling alias for the newest Sonnet (5.5 as of 2026-10-30; the kiosk
         // catalog lists 1M context, 8192 max completion, $2/$10 per 1M).
         { id: 'claude-sonnet-latest', name: 'Claude Sonnet (latest)', reasoning: true, input: ['text', 'image'], cost: { input: 2, output: 10, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000000, maxTokens: 8192, compat: kioskCompat },
+        // Pinned Sonnet 5 (offered in the pick-list instead of the rolling alias
+        // since 2026-11-04): 1M context, 8192 max completion, $3/$15 per 1M per
+        // the kiosk catalog.
+        { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', reasoning: true, input: ['text', 'image'], cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000000, maxTokens: 8192, compat: kioskCompat },
         // MiniMax M3.1 Flash: text only, 1M context, 8192 max completion,
         // $0.15/$0.60 per 1M per the kiosk catalog (2026-10-30). The free
         // promotion id `minimax-m3.1-flash:free` (2026-10-21) was retired by the
