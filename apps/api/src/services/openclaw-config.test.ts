@@ -109,14 +109,15 @@ describe('reply latency defaults (2026-10-16)', () => {
     expect(generateOpenClawConfig(base).agents!.defaults.toolProgressDetail).toBe('raw');
   });
 
-  it('overlays streaming and reply threading onto an existing Slack block without touching the rest of it', () => {
+  it('updates a platform-written streaming value and missing reply threading without touching the rest of the block', () => {
     const existing = generateOpenClawConfig(withSlack);
+    const { replyToModeByChatType: _dropped, ...slackBlock } = existing.channels!.slack!;
     existing.channels!.slack = {
-      ...existing.channels!.slack!,
+      ...slackBlock,
       botToken: 'xoxb-user-rotated',
       allowFrom: ['U123'],
-      streaming: { mode: 'off' },
-      replyToModeByChatType: { direct: 'all' },
+      // The value the generator wrote before 2026-10-23.
+      streaming: { mode: 'progress', progress: { toolProgress: true, commandText: 'status' } },
     };
     const merged = mergeOpenClawConfig(existing as unknown as Parameters<typeof mergeOpenClawConfig>[0], withSlack);
     const slack = merged.channels!.slack!;
@@ -127,6 +128,29 @@ describe('reply latency defaults (2026-10-16)', () => {
     expect(slack.replyToModeByChatType).toEqual({ direct: 'all', group: 'all', channel: 'all' });
     expect(slack.botToken).toBe('xoxb-user-rotated');
     expect(slack.allowFrom).toEqual(['U123']);
+  });
+
+  it('keeps Slack streaming and reply threading the member chose', () => {
+    const existing = generateOpenClawConfig(withSlack);
+    const quiet = { progress: { style: 'card', toolProgress: false, nativeTaskCards: false }, mode: 'progress' };
+    existing.channels!.slack = {
+      ...existing.channels!.slack!,
+      streaming: quiet as never,
+      replyToModeByChatType: { direct: 'off', group: 'all', channel: 'all' },
+    };
+    const slack = mergeOpenClawConfig(existing as unknown as Parameters<typeof mergeOpenClawConfig>[0], withSlack).channels!.slack!;
+    expect(slack.streaming).toEqual(quiet);
+    expect(slack.replyToModeByChatType).toEqual({ direct: 'off', group: 'all', channel: 'all' });
+
+    existing.channels!.slack!.streaming = { mode: 'off' };
+    expect(mergeOpenClawConfig(existing as unknown as Parameters<typeof mergeOpenClawConfig>[0], withSlack).channels!.slack!.streaming).toEqual({ mode: 'off' });
+  });
+
+  it('treats the current platform value as ours whatever its key order', () => {
+    const existing = generateOpenClawConfig(withSlack);
+    existing.channels!.slack!.streaming = { progress: { commandText: 'raw', toolProgress: true }, mode: 'progress' } as never;
+    const slack = mergeOpenClawConfig(existing as unknown as Parameters<typeof mergeOpenClawConfig>[0], withSlack).channels!.slack!;
+    expect(JSON.stringify(slack.streaming)).toBe(JSON.stringify({ mode: 'progress', progress: { toolProgress: true, commandText: 'raw' } }));
   });
 
   it('replaces agents.defaults wholesale so thinkingDefault survives a redeploy', () => {

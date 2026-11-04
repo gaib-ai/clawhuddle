@@ -50,13 +50,22 @@ const FORCE_DISABLED_PLUGINS = [
 
 export interface SlackStreaming {
   mode: 'off' | 'partial' | 'block' | 'progress';
-  progress?: { toolProgress?: boolean; commandText?: 'status' | 'raw' };
+  progress?: {
+    toolProgress?: boolean;
+    commandText?: 'status' | 'raw';
+    /** false = Block Kit session card instead of Slack's native task card. */
+    nativeTaskCards?: boolean;
+    style?: 'card' | 'compact';
+  };
 }
 
 /**
- * Live progress for Slack replies. Platform-managed: mergeOpenClawConfig
- * overlays it onto a member's existing Slack block on every redeploy, so a
- * change here reaches all gateways without touching their tokens.
+ * Live progress for Slack replies. Platform default: mergeOpenClawConfig
+ * writes it onto a member's existing Slack block on every redeploy while the
+ * block still holds a value the platform wrote (see SLACK_STREAMING_HISTORY),
+ * so a change here reaches every gateway. A value the member chose themselves
+ * is kept (2026-11-04: a member wanted the quieter Block Kit card, because the
+ * native card stays behind as "Completed" on turns the agent ends silently).
  *
  * `progress` (OpenClaw's default since 2026.8.1) streams one task card per
  * turn; `toolProgress: true` adds a row per tool call, and `commandText:
@@ -70,10 +79,23 @@ const SLACK_STREAMING: SlackStreaming = {
   progress: { toolProgress: true, commandText: 'raw' },
 };
 
+/**
+ * Every `streaming` value the platform has written, current one included. An
+ * existing block holding one of these (or none) is ours to update. The older
+ * `{ mode: 'off' }` is left out on purpose: every Slack instance was moved off
+ * it by 2026-10-23, so an `off` found now is the member's own choice.
+ */
+const SLACK_STREAMING_HISTORY: unknown[] = [
+  { mode: 'progress', progress: { toolProgress: true, commandText: 'status' } },
+  SLACK_STREAMING,
+];
+
 export type SlackReplyToMode = 'off' | 'first' | 'all';
 
 /**
- * Where Slack replies go, per chat type. Platform-managed like `streaming`.
+ * Where Slack replies go, per chat type. A platform default like `streaming`:
+ * updated while absent or still the platform's value, kept once the member
+ * changes it.
  *
  * Slack only draws its native agent status bar (the "Working…" card with one
  * row per tool call) inside a thread. With the default `off`, a DM or channel
@@ -632,16 +654,16 @@ export function mergeOpenClawConfig(
         mergedChannels[channelId] = channelCfg;
         continue;
       }
-      // Platform-managed presentation keys ride on top of the user's channel
-      // block (tokens, allowlists and accounts stay theirs). Without this an
-      // existing Slack block kept the `streaming: off` an older generator wrote.
-      const existing = mergedChannels[channelId];
+      // Platform presentation defaults ride on top of the user's channel block
+      // (tokens, allowlists and accounts stay theirs), but only while the
+      // block still holds a value we wrote: one the member set is theirs.
+      const existing = mergedChannels[channelId] as Record<string, unknown> | undefined;
       if (!existing || typeof existing !== 'object' || Array.isArray(existing)) continue;
-      if (channelCfg.streaming) {
-        (existing as Record<string, unknown>).streaming = channelCfg.streaming;
+      if (channelCfg.streaming && isPlatformValue(existing.streaming, SLACK_STREAMING_HISTORY)) {
+        existing.streaming = channelCfg.streaming;
       }
-      if (channelCfg.replyToModeByChatType) {
-        (existing as Record<string, unknown>).replyToModeByChatType = channelCfg.replyToModeByChatType;
+      if (channelCfg.replyToModeByChatType && isPlatformValue(existing.replyToModeByChatType, [SLACK_REPLY_TO_MODE])) {
+        existing.replyToModeByChatType = channelCfg.replyToModeByChatType;
       }
     }
   }
@@ -686,6 +708,22 @@ export function mergeOpenClawConfig(
   }
 
   return merged as unknown as OpenClawConfig;
+}
+
+/** True when `value` is unset or equals (key order aside) one of the values the platform has written. */
+function isPlatformValue(value: unknown, written: unknown[]): boolean {
+  if (value === undefined) return true;
+  const key = canonicalJson(value);
+  return written.some((w) => canonicalJson(w) === key);
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
 }
 
 /** Writes every leaf of `managed` into `target[key]`, keeping the member's other keys at each level. */
