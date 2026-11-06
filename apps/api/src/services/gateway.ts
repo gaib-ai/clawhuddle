@@ -1301,15 +1301,38 @@ function assertRequestId(requestId: string): void {
   if (!DEVICE_REQUEST_ID.test(requestId)) throw new Error("Invalid request id");
 }
 
+/** Read `clawhuddle-pending-devices` output; null unless it is a plain count. */
+export function parsePendingCount(output: string): number | null {
+  const text = output.trim();
+  return /^\d+$/.test(text) ? Number(text) : null;
+}
+
 /**
- * Browsers/devices waiting to be approved into an instance's Control UI.
- * Pairing is never approved automatically (see docker/gateway/entrypoint.sh);
- * a stopped instance simply has none.
+ * The cheap pending check (docker/gateway/pending-devices.cjs). Null means
+ * unknown: the check failed, or the instance predates it and has not been
+ * redeployed yet (exec exits 127).
+ */
+async function pendingDeviceCount(containerName: string): Promise<number | null> {
+  try {
+    return parsePendingCount(await execInContainer(containerName, ["clawhuddle-pending-devices"]));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Browsers/devices waiting to be approved into an instance's Control UI. The
+ * entrypoint auto-approves within seconds where its loop is running (see
+ * docker/gateway/entrypoint.sh), so this is usually empty, and the sidebar polls
+ * it from every open tab: the CLI, which costs ~4.5 CPU-seconds, runs only when
+ * the cheap check does not say 0. A stopped instance simply has none.
  */
 export async function listDeviceRequests(orgId: string, gatewayId: string): Promise<DevicePairingRequest[]> {
   const g = getGatewayRow(orgId, gatewayId);
   if (g.status !== "running") return [];
-  const output = await execInContainer(containerNameFor(g), ["openclaw", "devices", "list", "--json"]);
+  const container = containerNameFor(g);
+  if ((await pendingDeviceCount(container)) === 0) return [];
+  const output = await execInContainer(container, ["openclaw", "devices", "list", "--json"]);
   return parseDeviceRequests(output);
 }
 

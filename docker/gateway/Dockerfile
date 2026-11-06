@@ -58,5 +58,6 @@ RUN npm install -g ntn@0.23.21
 COPY patch-control-ui.sh /patch-control-ui.sh
 RUN sh /patch-control-ui.sh && rm /patch-control-ui.sh
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY pending-devices.cjs /usr/local/bin/clawhuddle-pending-devices
+RUN chmod +x /entrypoint.sh /usr/local/bin/clawhuddle-pending-devices
 ENTRYPOINT ["/entrypoint.sh"]

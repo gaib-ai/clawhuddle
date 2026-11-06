@@ -99,16 +99,22 @@ done
 # `approve --latest` only previews — we must list pending requests and
 # approve each by id. Can be removed once OpenClaw releases
 # skipDevicePairingForTrustedProxy.
+#
+# The CLI costs ~4.5 CPU-seconds a run, so ask clawhuddle-pending-devices first.
+# Only an exact 0 skips it: if the check fails it prints nothing and we go on to
+# the CLI, so a change in OpenClaw's schema costs CPU, never approvals.
 while true; do
-  ids=$(openclaw devices list --json 2>/dev/null | node -e '
-    let d="";
-    process.stdin.on("data", c => d += c).on("end", () => {
-      try { JSON.parse(d).pending.forEach(p => console.log(p.requestId)); } catch {}
-    });
-  ' 2>/dev/null)
-  for id in $ids; do
-    openclaw devices approve "$id" >/dev/null 2>&1 || true
-  done
+  if [ "$(clawhuddle-pending-devices 2>/dev/null)" != "0" ]; then
+    ids=$(openclaw devices list --json 2>/dev/null | node -e '
+      let d="";
+      process.stdin.on("data", c => d += c).on("end", () => {
+        try { JSON.parse(d).pending.forEach(p => console.log(p.requestId)); } catch {}
+      });
+    ' 2>/dev/null)
+    for id in $ids; do
+      openclaw devices approve "$id" >/dev/null 2>&1 || true
+    done
+  fi
   sleep 5
 done &
 

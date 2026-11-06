@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -20,6 +20,8 @@ const docker = vi.hoisted(() => ({
   execs: [] as string[][],
   /** What `openclaw devices list --json` prints inside the stub container. */
   devicesJson: '{"pending":[],"paired":[]}',
+  /** stdout and exit code of `clawhuddle-pending-devices`; empty means unknown. */
+  pendingCheck: { stdout: '', exitCode: 0 },
   /** stdout for `sh -c <script>` execs, picked by a substring of the script. */
   shOutputs: {} as Record<string, string>,
 }));
@@ -45,11 +47,13 @@ vi.mock('dockerode', () => {
     async exec(opts: { Cmd: string[] }) {
       docker.execs.push(opts.Cmd);
       const isList = opts.Cmd.slice(0, 3).join(' ') === 'openclaw devices list';
+      const isCheck = opts.Cmd[0] === 'clawhuddle-pending-devices';
       const sh = opts.Cmd[0] === 'sh'
         ? Object.entries(docker.shOutputs).find(([k]) => opts.Cmd[2]?.includes(k))?.[1]
         : undefined;
       const chunks = isList
         ? [frame(2, 'warn: something on stderr\n'), frame(1, docker.devicesJson.slice(0, 10)), frame(1, docker.devicesJson.slice(10))]
+        : isCheck ? [frame(1, docker.pendingCheck.stdout)]
         : sh !== undefined ? [frame(1, sh)] : [];
       return {
         start: async () => ({
@@ -59,7 +63,7 @@ vi.mock('dockerode', () => {
             if (event === 'end') setTimeout(cb, 0);
           },
         }),
-        inspect: async () => ({ ExitCode: 0 }),
+        inspect: async () => ({ ExitCode: isCheck ? docker.pendingCheck.exitCode : 0 }),
       };
     }
   }
@@ -445,6 +449,43 @@ describe('device pairing', () => {
     expect(res.json().data).toEqual([]);
     expect(res.json().errors).toEqual([{ gateway_id: membersInstance, message: expect.stringContaining('JSON') }]);
     docker.devicesJson = '{"pending":[],"paired":[]}';
+  });
+
+  describe('cheap pending check', () => {
+    const list = async () => {
+      docker.execs.length = 0;
+      const res = await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/me/device-requests`, headers: await as(MEMBER) });
+      expect(res.statusCode).toBe(200);
+      return {
+        requests: res.json().data.map((r: { requestId: string }) => r.requestId),
+        ranCli: docker.execs.some((c) => c[0] === 'openclaw'),
+      };
+    };
+
+    beforeAll(() => { docker.devicesJson = JSON.stringify({ pending: [PENDING], paired: [] }); });
+    afterEach(() => { docker.pendingCheck = { stdout: '', exitCode: 0 }; });
+    afterAll(() => { docker.devicesJson = '{"pending":[],"paired":[]}'; });
+
+    it('skips the CLI when nothing is waiting', async () => {
+      docker.pendingCheck = { stdout: '0\n', exitCode: 0 };
+      expect(await list()).toEqual({ requests: [], ranCli: false });
+    });
+
+    it('asks the CLI once something is waiting', async () => {
+      docker.pendingCheck = { stdout: '1\n', exitCode: 0 };
+      expect(await list()).toEqual({ requests: [PENDING.requestId], ranCli: true });
+    });
+
+    // A request must never disappear because the check could not answer.
+    it.each([
+      ['an instance on an older image', { stdout: 'exec: not found\n', exitCode: 127 }],
+      ['a check that fails', { stdout: '', exitCode: 1 }],
+      ['output that is not a count', { stdout: 'warn: 0\n', exitCode: 0 }],
+      ['no output', { stdout: '', exitCode: 0 }],
+    ])('falls back to the CLI for %s', async (_case, check) => {
+      docker.pendingCheck = check;
+      expect(await list()).toEqual({ requests: [PENDING.requestId], ranCli: true });
+    });
   });
 
   it('has nothing to show for a stopped instance', async () => {
