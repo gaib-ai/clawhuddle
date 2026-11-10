@@ -34,7 +34,8 @@ import {
   summarizeGateway,
   type GatewayRow,
 } from '../../services/gateway-store.js';
-import { PROVIDER_IDS, MODEL_IDS, type CreateGatewayRequest, type UpdateGatewayRequest } from '@clawhuddle/shared';
+import { PROVIDER_IDS, MODEL_IDS, USAGE_RANGES, type CreateGatewayRequest, type UpdateGatewayRequest } from '@clawhuddle/shared';
+import { getGatewayUsage } from '../../services/usage.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -447,6 +448,30 @@ export async function orgGatewayRoutes(app: FastifyInstance) {
       },
     );
   }
+
+  // LLM usage (tokens, list-price cost estimate) from OpenClaw's own session
+  // accounting: aggregates by model, channel and day, no content. Own instance
+  // or admin+; the admin Usage page asks for each running instance in turn.
+  app.get<GatewayParams & { Querystring: { days?: string; refresh?: string } }>(
+    '/api/orgs/:orgId/gateways/:gatewayId/usage',
+    own,
+    async (request, reply) => {
+      const days = Number(request.query.days ?? 30);
+      if (!(USAGE_RANGES as readonly number[]).includes(days)) {
+        return reply.status(400).send({ error: 'validation', message: `days must be one of ${USAGE_RANGES.join(', ')}` });
+      }
+      const g = request.gateway!;
+      if (g.status !== 'running') {
+        return reply.status(409).send({ error: 'not_running', message: 'Instance is not running' });
+      }
+      try {
+        return { data: await getGatewayUsage(g, days, { refresh: request.query.refresh === '1' }) };
+      } catch (err: any) {
+        request.log.warn({ gatewayId: g.id, err: err?.message }, 'usage read failed');
+        return reply.status(502).send({ error: 'usage_unavailable', message: err?.message || 'Could not read usage' });
+      }
+    },
+  );
 
   // Google sign-in for gog. Anyone who may see the instance sees which accounts
   // are connected; only its own member can connect or disconnect one, because

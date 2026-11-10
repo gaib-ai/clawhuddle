@@ -97,6 +97,10 @@ A provider with `kind: 'secret'` in `PROVIDERS` (today: `notion`, entry `NOTION_
 
 **Google sign-in from Home.** Each running instance card has a Google account section (`components/google-connect.tsx`) backed by `GET /gateways/:gatewayId/google` (readiness `ready` / `pending` / `restart` / `no-client` / `keyring`, plus connected accounts) and, for the instance's own member only (`requireGatewayAccess({ ownOnly: true })`), `POST …/google/start`, `POST …/google/finish` and `DELETE …/google/accounts/:email`. They drive gog's remote flow (`gog auth add <email> --remote --step=1|2`, services `GOG_SIGN_IN_SERVICES`) with the instance env sourced. The shared client is a Desktop OAuth client, which only allows loopback redirects, so Google ends on an `http://127.0.0.1:<port>/oauth2/callback?…` page that does not load; the member pastes that address back, it is validated as loopback with `code` and `state`, and handed to gog through a transient 0600 file, never on a command line or in a log.
 
+## LLM usage (Admin → Usage)
+
+`GET /api/orgs/:orgId/gateways/:gatewayId/usage?days=1|7|30|90` (own instance or admin+, running only) runs OpenClaw's `sessions.usage` gateway method in the container (`openclaw gateway call sessions.usage`, the same numbers as the Control UI's Usage tab) and `services/usage.ts` condenses it to `GatewayUsage`: totals, by model, by channel (`other` = no channel: cron, heartbeat, Control UI), per day, message/error counts. Session keys, titles and creators are dropped; nothing per person or per message leaves the container. Cost is OpenClaw's list-price estimate, not what Token Kiosk or Claw Proxy bill. Each read is a CLI run (~2–6 s), so at most 3 run at once, complete results are cached 5 min (`refresh=1` skips it), and an incomplete one (`cacheStatus` ≠ `fresh`: OpenClaw re-indexes transcripts in memory after every restart, so the first read after a boot returns zeros) is never cached — the page re-asks after 5/10/20 s.
+
 ## Config Generation
 
 `apps/api/src/services/openclaw-config.ts`:

@@ -144,6 +144,44 @@ export interface DeviceRequestList {
   errors: { gateway_id: string; message: string }[];
 }
 
+/** Token counts and OpenClaw's list-price cost estimate (USD) for a set of model calls. */
+export interface UsageTotals {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  totalTokens: number;
+  totalCost: number;
+  /** Calls whose model has no price in OpenClaw's catalog (cost counted as 0). */
+  missingCostEntries: number;
+}
+
+/** Usage windows the usage route accepts, in days ending today (UTC). */
+export const USAGE_RANGES = [1, 7, 30, 90] as const;
+export type UsageRange = (typeof USAGE_RANGES)[number];
+
+/**
+ * One instance's LLM usage over a date range, condensed from OpenClaw's
+ * `sessions.usage` gateway method. Aggregates only: no session titles,
+ * participants or message content.
+ */
+export interface GatewayUsage {
+  gateway_id: string;
+  startDate: string;
+  endDate: string;
+  /** When OpenClaw computed it, epoch ms. */
+  updatedAt: number;
+  /** `fresh` = complete; otherwise OpenClaw is still indexing transcripts and totals may be low. */
+  cacheStatus: string;
+  totals: UsageTotals;
+  sessions: number;
+  messages: { user: number; assistant: number; toolCalls: number; errors: number };
+  byModel: { provider: string; model: string; calls: number; totals: UsageTotals }[];
+  /** Tokens by chat channel; `other` = sessions with no channel (cron, heartbeat, Control UI). */
+  byChannel: { channel: string; tokens: number; cost: number }[];
+  daily: { date: string; tokens: number; cost: number; messages: number; errors: number }[];
+}
+
 export interface User {
   id: string;
   email: string;

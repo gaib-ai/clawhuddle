@@ -1191,7 +1191,7 @@ export function demuxDockerStream(raw: Buffer): { stdout: string; stderr: string
 }
 
 /** Run a command inside a gateway container and return its stdout. */
-async function execInContainer(
+export async function execInContainer(
   containerName: string,
   cmd: string[],
   timeoutMs = 10000,
