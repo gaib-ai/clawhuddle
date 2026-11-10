@@ -1,6 +1,6 @@
-# Pinned: openclaw 2026.9.4 requires node >=24.16.0 <25 (or >=26.1.0).
+# Pinned: openclaw 2026.10.6+ requires node >=24.22.1 on the 24 line (or >=26.12.1).
 # The floating node:24 tag would satisfy that today but is not reproducible.
-FROM node:24.18
+FROM node:24.22.1
 RUN apt-get update && apt-get install -y git socat && rm -rf /var/lib/apt/lists/*
 # Homebrew (Linuxbrew). Homebrew refuses to run as root and the gateway runs
 # as root, so it is installed under a dedicated `linuxbrew` user and exposed
@@ -32,7 +32,9 @@ ENV PATH=$PATH:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin \
 RUN brew install gh gogcli && brew cleanup -s && rm -rf /home/linuxbrew/.cache/Homebrew
 ENV GH_CONFIG_DIR=/root/.openclaw/gh \
     GOG_HOME=/root/.openclaw/gog
-RUN npm install -g openclaw@2026.10.3
+# npm 11.19+ skips dependency install scripts unless allowed; these are the ones
+# openclaw 2026.11.2 pulls in (earlier images ran them by default).
+RUN npm install -g --allow-scripts=openclaw,esbuild,protobufjs,@google/genai openclaw@2026.11.2
 # Chromium for OpenClaw's browser tool. OpenClaw drives it over CDP through the
 # playwright-core it bundles, so install the matching build with that CLI (same
 # step as the official image's OPENCLAW_INSTALL_BROWSER). It lives inside the
@@ -53,7 +55,7 @@ RUN apt-get update \
 # back to curl without it). Baked in because an `npm install -g` done at
 # runtime lands in the container fs and is wiped on redeploy. The token comes
 # from the member's secret store (skills.entries.notion.apiKey SecretRef).
-RUN npm install -g ntn@0.23.21
+RUN npm install -g --allow-scripts=ntn ntn@0.23.21
 # Default the Control UI language to English (see patch-control-ui.sh).
 COPY patch-control-ui.sh /patch-control-ui.sh
 RUN sh /patch-control-ui.sh && rm /patch-control-ui.sh

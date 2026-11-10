@@ -254,6 +254,8 @@ export interface OpenClawConfig {
       thinkingDefault?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'adaptive';
       /** What progress rows say about a tool call: a human title only, or the title plus the raw call (paths, URLs, commands). */
       toolProgressDetail?: 'explain' | 'raw';
+      /** Defaults for every agent's heartbeat; `agents.entries.<id>.heartbeat` (member-owned) overrides per key. */
+      heartbeat?: { isolatedSession?: boolean };
     };
     list?: Array<{
       id: string;
@@ -532,6 +534,12 @@ export function generateOpenClawConfig(options: {
       // next to the human title, instead of a bare "exec". Members asked for
       // it in Slack (2026-10-22); the Control UI shows the same rows.
       toolProgressDetail: 'raw',
+      // OpenClaw runs the 30-min heartbeat in the agent's main session by
+      // default, replaying its whole history every tick (2026-10-20: a 386k-token
+      // session, up to 294 s a run). A fresh session per run costs ~2–5k tokens;
+      // delivery still follows the heartbeat's target. A member's own
+      // agents.entries.<id>.heartbeat.isolatedSession still wins.
+      heartbeat: { isolatedSession: true },
     },
     list: [{ id: 'main', default: true, reasoningDefault: 'off' }],
   };
