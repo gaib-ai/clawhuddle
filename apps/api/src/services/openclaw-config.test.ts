@@ -168,6 +168,17 @@ describe('reply latency defaults (2026-10-16)', () => {
     expect(merged.agents.defaults.heartbeat).toEqual({ isolatedSession: true });
     expect(merged.agents.entries.main.heartbeat).toEqual({ every: '0m', isolatedSession: false });
   });
+
+  it('keeps a member-set agents.defaults.heartbeat and only adds isolatedSession', () => {
+    const existing = generateOpenClawConfig(base) as unknown as Record<string, any>;
+    existing.agents.defaults.heartbeat = { every: '0m' };
+    const merged = mergeOpenClawConfig(existing as Parameters<typeof mergeOpenClawConfig>[0], base) as unknown as Record<string, any>;
+    expect(merged.agents.defaults.heartbeat).toEqual({ isolatedSession: true, every: '0m' });
+
+    existing.agents.defaults.heartbeat = { isolatedSession: false };
+    const optedOut = mergeOpenClawConfig(existing as Parameters<typeof mergeOpenClawConfig>[0], base) as unknown as Record<string, any>;
+    expect(optedOut.agents.defaults.heartbeat).toEqual({ isolatedSession: false });
+  });
 });
 
 describe('Slack access (2026-10-21)', () => {

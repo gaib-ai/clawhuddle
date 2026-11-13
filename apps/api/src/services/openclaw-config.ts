@@ -642,7 +642,16 @@ export function mergeOpenClawConfig(
     if (typeof merged.agents !== 'object' || merged.agents === null) {
       merged.agents = {};
     }
-    (merged.agents as Record<string, unknown>).defaults = generated.agents.defaults;
+    const prevDefaults = (merged.agents as Record<string, unknown>).defaults as Record<string, unknown> | undefined;
+    const prevHeartbeat = prevDefaults?.heartbeat;
+    const defaults: Record<string, unknown> = { ...generated.agents.defaults };
+    // agents.defaults.heartbeat predates the platform writing it (members set
+    // e.g. `every: '0m'` there), so the member's keys win and the platform's
+    // isolatedSession only fills in what is missing.
+    if (prevHeartbeat && typeof prevHeartbeat === 'object' && !Array.isArray(prevHeartbeat)) {
+      defaults.heartbeat = { ...(generated.agents.defaults.heartbeat ?? {}), ...prevHeartbeat };
+    }
+    (merged.agents as Record<string, unknown>).defaults = defaults;
   } else if (merged.agents && typeof merged.agents === 'object') {
     // No active providers — clear managed defaults but preserve other agent settings
     delete (merged.agents as Record<string, unknown>).defaults;
