@@ -43,11 +43,18 @@ export interface UpdateOrgRequest {
   max_gateways_per_user?: number | null;
 }
 
+/**
+ * owner > admin > maintainer > member. A maintainer only sees the Members
+ * table, only the rows of plain members (plus their own), and only manages
+ * those members' instances: no invites, role/status/limit changes or keys.
+ */
+export type OrgRole = 'owner' | 'admin' | 'maintainer' | 'member';
+
 export interface OrgMember {
   id: string;
   org_id: string;
   user_id: string;
-  role: 'owner' | 'admin' | 'member';
+  role: OrgRole;
   status: 'active' | 'disabled';
   /**
    * Mirror of the member's slot-1 gateway (see `Gateway`), kept so an older
@@ -220,11 +227,11 @@ export interface CreateOrgRequest {
 
 export interface InviteMemberRequest {
   email: string;
-  role?: 'admin' | 'member';
+  role?: 'admin' | 'maintainer' | 'member';
 }
 
 export interface UpdateMemberRequest {
-  role?: 'owner' | 'admin' | 'member';
+  role?: OrgRole;
   status?: 'active' | 'disabled';
   /** Integer >= 1, or null to follow the org default. */
   max_gateways?: number | null;

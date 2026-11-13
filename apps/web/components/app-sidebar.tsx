@@ -252,6 +252,7 @@ export function AppSidebar({
   const { data: session } = useSession();
   const { currentOrgId, memberRole } = useOrg();
   const isAdmin = memberRole === 'admin' || memberRole === 'owner';
+  const isMaintainer = memberRole === 'maintainer';
   const isSuperAdmin = useSuperAdmin();
 
   return (
@@ -316,6 +317,16 @@ export function AppSidebar({
               <NavItem href="/devices" icon={icons.devices} label="Device Requests" active={pathname.startsWith('/devices')} badge={pendingDevices} />
               <NavItem href="/api-keys" icon={icons.keys} label="My API Keys" active={pathname.startsWith('/api-keys')} />
             </div>
+
+            {/* Maintainer: the Members table only, scoped to plain members */}
+            {isMaintainer && (
+              <>
+                <SectionLabel>Maintain</SectionLabel>
+                <div className="space-y-0.5">
+                  <NavItem href="/admin" icon={icons.members} label="Members" active={pathname === '/admin'} />
+                </div>
+              </>
+            )}
 
             {/* Admin */}
             {isAdmin && (

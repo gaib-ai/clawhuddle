@@ -60,6 +60,9 @@ export function MemberTable({ initialMembers }: Props) {
   const { toast } = useToast();
   const { confirm } = useConfirm();
   const userId = session?.user?.id;
+  // Maintainers only manage plain members' instances: no invites, roles,
+  // suspensions, limits or keys. The API enforces it; this hides the controls.
+  const isMaintainer = memberRole === 'maintainer';
   const [members, setMembers] = useState(initialMembers);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviting, setInviting] = useState(false);
@@ -255,10 +258,17 @@ export function MemberTable({ initialMembers }: Props) {
     }
   };
 
-  // Same rule as role changes: owners can open any gateway, admins any but an owner's.
-  // The API enforces it; this only decides whether to show the button.
+  // Same rule as role changes: owners can open any gateway, admins any but an
+  // owner's, maintainers only plain members'. The API enforces it; this only
+  // decides whether to show the button.
   const canOpenGateway = (member: OrgMember) =>
-    member.user_id === userId || memberRole === 'owner' || (memberRole === 'admin' && member.role !== 'owner');
+    member.user_id === userId ||
+    memberRole === 'owner' ||
+    (memberRole === 'admin' && member.role !== 'owner') ||
+    (memberRole === 'maintainer' && member.role === 'member');
+
+  // Maintainers can run members' instances but only remove their own.
+  const canRemoveGateway = (member: OrgMember) => !isMaintainer || member.user_id === userId;
 
   const openGateway = async (gateway: GatewaySummary) => {
     // Open the tab during the click so popup blockers allow it, then point it at
@@ -308,7 +318,7 @@ export function MemberTable({ initialMembers }: Props) {
         <span className="flex flex-wrap gap-x-4 gap-y-1 md:gap-3 items-center">
           <span className="text-xs" style={{ color: 'var(--blue)' }}>starting up...</span>
           <ActionBtn onClick={() => gatewayAction(gateway, 'stop')}>Stop</ActionBtn>
-          <ActionBtn onClick={() => gatewayAction(gateway, 'remove')} color="danger">Remove</ActionBtn>
+          {canRemoveGateway(member) && <ActionBtn onClick={() => gatewayAction(gateway, 'remove')} color="danger">Remove</ActionBtn>}
         </span>
       );
     }
@@ -321,7 +331,7 @@ export function MemberTable({ initialMembers }: Props) {
           )}
           <ActionBtn onClick={() => gatewayAction(gateway, 'redeploy')}>Redeploy</ActionBtn>
           <ActionBtn onClick={() => gatewayAction(gateway, 'stop')}>Stop</ActionBtn>
-          <ActionBtn onClick={() => gatewayAction(gateway, 'remove')} color="danger">Remove</ActionBtn>
+          {canRemoveGateway(member) && <ActionBtn onClick={() => gatewayAction(gateway, 'remove')} color="danger">Remove</ActionBtn>}
         </span>
       );
     }
@@ -330,7 +340,7 @@ export function MemberTable({ initialMembers }: Props) {
       <span className="flex flex-wrap gap-x-4 gap-y-1 md:gap-3">
         <ActionBtn onClick={() => gatewayAction(gateway, 'start')} color="success">Start</ActionBtn>
         <ActionBtn onClick={() => gatewayAction(gateway, 'redeploy')}>Redeploy</ActionBtn>
-        <ActionBtn onClick={() => gatewayAction(gateway, 'remove')} color="danger">Remove</ActionBtn>
+        {canRemoveGateway(member) && <ActionBtn onClick={() => gatewayAction(gateway, 'remove')} color="danger">Remove</ActionBtn>}
       </span>
     );
   };
@@ -387,12 +397,18 @@ export function MemberTable({ initialMembers }: Props) {
   const roleColor = (role: string) => {
     if (role === 'owner') return 'yellow';
     if (role === 'admin') return 'purple';
+    if (role === 'maintainer') return 'blue';
     return 'gray';
   };
 
   return (
     <div>
       {/* Invite form */}
+      {isMaintainer ? (
+        <p className="text-xs mb-4" style={{ color: 'var(--text-tertiary)' }}>
+          {members.length} member{members.length === 1 ? '' : 's'}. As a maintainer you manage members’ instances; ask an admin to invite people or change roles.
+        </p>
+      ) : (
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <input
           type="email"
@@ -433,6 +449,7 @@ export function MemberTable({ initialMembers }: Props) {
           </button>
         )}
       </div>
+      )}
 
       {/* Member limit banner */}
       {limitHit && (
@@ -461,7 +478,9 @@ export function MemberTable({ initialMembers }: Props) {
         >
           <span style={{ color: 'var(--text-primary)' }}>
             {gatewayLimitHit.member.name || gatewayLimitHit.member.email} is at their limit of {gatewayLimitHit.limit} instance{gatewayLimitHit.limit === 1 ? '' : 's'}.
-            Raise it in the Max column, or for everyone under Admin → API Keys → Instances per member.
+            {isMaintainer
+              ? ' Ask an admin to raise it.'
+              : ' Raise it in the Max column, or for everyone under Admin → API Keys → Instances per member.'}
           </span>
           <button
             onClick={() => setGatewayLimitHit(null)}
@@ -513,7 +532,10 @@ export function MemberTable({ initialMembers }: Props) {
         <table className="w-full text-sm stack-table">
           <thead>
             <tr style={{ borderBottom: '1px solid var(--border-primary)' }}>
-              {['Name', 'Email', 'Role', 'Status', 'Gateways', 'Max', 'Member'].map((h) => (
+              {(isMaintainer
+                ? ['Name', 'Email', 'Role', 'Status', 'Gateways', 'Max']
+                : ['Name', 'Email', 'Role', 'Status', 'Gateways', 'Max', 'Member']
+              ).map((h) => (
                 <th
                   key={h}
                   className="px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-wider"
@@ -558,16 +580,19 @@ export function MemberTable({ initialMembers }: Props) {
                         background:
                           member.role === 'owner' ? 'var(--yellow-muted)' :
                           member.role === 'admin' ? 'var(--purple-muted)' :
+                          member.role === 'maintainer' ? 'var(--blue-muted)' :
                           'var(--bg-tertiary)',
                         color:
                           member.role === 'owner' ? 'var(--yellow)' :
                           member.role === 'admin' ? 'var(--purple)' :
+                          member.role === 'maintainer' ? 'var(--blue)' :
                           'var(--text-tertiary)',
                         border: 'none',
                       }}
                     >
                       {memberRole === 'owner' && <option value="owner">owner</option>}
                       <option value="admin">admin</option>
+                      <option value="maintainer">maintainer</option>
                       <option value="member">member</option>
                     </select>
                   ) : (
@@ -585,6 +610,11 @@ export function MemberTable({ initialMembers }: Props) {
                   {gatewayCell(member)}
                 </td>
                 <td className="px-4 py-3 stack-inline" data-label="Max instances">
+                  {isMaintainer ? (
+                    <span className="text-xs tabular-nums" style={{ color: 'var(--text-secondary)' }}>
+                      {member.effective_max_gateways ?? 1}
+                    </span>
+                  ) : (
                   <input
                     type="number"
                     min={1}
@@ -597,7 +627,9 @@ export function MemberTable({ initialMembers }: Props) {
                     className="w-14 px-2 py-1 text-xs rounded-md"
                     style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
                   />
+                  )}
                 </td>
+                {!isMaintainer && (
                 <td className="px-4 py-3" data-label="Member">
                   <div className="flex flex-wrap md:flex-nowrap items-center gap-x-4 gap-y-1 md:gap-3">
                     <ActionBtn onClick={() => setApiKeysMember(member)}>
@@ -615,6 +647,7 @@ export function MemberTable({ initialMembers }: Props) {
                     )}
                   </div>
                 </td>
+                )}
               </tr>
             ))}
           </tbody>
@@ -625,7 +658,7 @@ export function MemberTable({ initialMembers }: Props) {
             className="text-center py-12 text-sm"
             style={{ color: 'var(--text-tertiary)' }}
           >
-            No members yet. Invite someone to get started.
+            {isMaintainer ? 'No members to manage yet.' : 'No members yet. Invite someone to get started.'}
           </p>
         )}
       </div>

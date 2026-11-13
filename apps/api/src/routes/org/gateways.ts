@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { getDb } from '../../db/index.js';
-import { requireRole } from '../../middleware/auth.js';
+import { canManageGatewaysOf, requireRole } from '../../middleware/auth.js';
 import {
   createGateway,
   deployGateway,
@@ -63,10 +63,11 @@ function maskToken(token: string): string {
 
 /**
  * Loads :gatewayId onto request.gateway. A member may act on their own
- * instances; owners and admins on anyone's — except that, as for role changes,
- * an admin cannot `release` (open) an owner's gateway.
+ * instances; owners and admins on anyone's, maintainers on plain members' —
+ * except that, as for role changes, an admin cannot `release` (open) an
+ * owner's gateway, and a maintainer cannot `remove` anyone's but their own.
  */
-function requireGatewayAccess(opts: { release?: boolean; ownOnly?: boolean } = {}) {
+function requireGatewayAccess(opts: { release?: boolean; ownOnly?: boolean; remove?: boolean } = {}) {
   return async (request: FastifyRequest, reply: FastifyReply) => {
     const { gatewayId } = request.params as { gatewayId: string };
     const row = findGatewayRow(request.orgId!, gatewayId);
@@ -78,8 +79,11 @@ function requireGatewayAccess(opts: { release?: boolean; ownOnly?: boolean } = {
       if (opts.ownOnly) {
         return reply.status(403).send({ error: 'forbidden', message: 'Only the instance’s own member can do this' });
       }
-      if (!['owner', 'admin'].includes(me.role)) {
+      if (!canManageGatewaysOf(me.role, row.member_role)) {
         return reply.status(403).send({ error: 'forbidden', message: 'Insufficient permissions' });
+      }
+      if (opts.remove && me.role === 'maintainer') {
+        return reply.status(403).send({ error: 'forbidden', message: 'Maintainers can only remove their own instances' });
       }
       if (opts.release && row.member_role === 'owner' && me.role !== 'owner') {
         return reply.status(403).send({ error: 'forbidden', message: "Only owners can open an owner's gateway" });
@@ -171,15 +175,22 @@ export async function orgGatewayRoutes(app: FastifyInstance) {
     },
   );
 
-  // Add an instance for a member (admin+ only); same limit as self-service
+  // Add an instance for a member (admin+, or a maintainer for a plain member);
+  // same limit as self-service
   app.post<{ Params: { orgId: string; memberId: string }; Body: CreateGatewayRequest }>(
     '/api/orgs/:orgId/gateways/members/:memberId',
-    { preHandler: requireRole('owner', 'admin') },
+    { preHandler: requireRole('owner', 'admin', 'maintainer') },
     async (request, reply) => {
       const { orgId, memberId } = request.params;
-      const member = getDb().prepare('SELECT id FROM org_members WHERE id = ? AND org_id = ?').get(memberId, orgId);
+      const member = getDb()
+        .prepare('SELECT id, role FROM org_members WHERE id = ? AND org_id = ?')
+        .get(memberId, orgId) as { id: string; role: string } | undefined;
       if (!member) {
         return reply.status(404).send({ error: 'not_found', message: 'Member not found' });
+      }
+      const me = request.orgMember!;
+      if (member.id !== me.id && !canManageGatewaysOf(me.role, member.role)) {
+        return reply.status(403).send({ error: 'forbidden', message: 'Insufficient permissions' });
       }
       const labelError = labelProblem(request.body?.label);
       if (labelError) return reply.status(400).send({ error: 'validation', message: labelError });
@@ -235,7 +246,7 @@ export async function orgGatewayRoutes(app: FastifyInstance) {
     });
   }
 
-  app.delete<GatewayParams>('/api/orgs/:orgId/gateways/:gatewayId', own, async (request, reply) => {
+  app.delete<GatewayParams>('/api/orgs/:orgId/gateways/:gatewayId', { preHandler: requireGatewayAccess({ remove: true }) }, async (request, reply) => {
     try {
       return { data: await removeGateway(request.orgId!, request.gateway!.id) };
     } catch (err: any) {
@@ -288,10 +299,11 @@ export async function orgGatewayRoutes(app: FastifyInstance) {
   // Hand an admin the credentials to open an instance's Control UI. Gateway
   // tokens are never part of a list; they are only released here, one instance
   // at a time, on an explicit request that is logged. Admins can't open an
-  // owner's gateway (same rule as role changes); owners can open any.
+  // owner's gateway (same rule as role changes); owners can open any;
+  // maintainers only plain members' (requireGatewayAccess).
   app.get<GatewayParams>(
     '/api/orgs/:orgId/gateways/:gatewayId/access',
-    { preHandler: [requireRole('owner', 'admin'), requireGatewayAccess({ release: true })] },
+    { preHandler: [requireRole('owner', 'admin', 'maintainer'), requireGatewayAccess({ release: true })] },
     async (request, reply) => {
       const g = request.gateway!;
       request.log.info(

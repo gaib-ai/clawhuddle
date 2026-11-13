@@ -106,6 +106,17 @@ export const orgPlugin = fp(async (app: FastifyInstance) => {
   });
 });
 
+/**
+ * Whether `actorRole` may manage instances belonging to someone with
+ * `targetRole` (not their own; a member always may act on their own).
+ * Owners and admins: anyone's. Maintainers: only plain members', and never
+ * to remove one (routes/org/gateways.ts).
+ */
+export function canManageGatewaysOf(actorRole: string, targetRole: string): boolean {
+  if (actorRole === 'owner' || actorRole === 'admin') return true;
+  return actorRole === 'maintainer' && targetRole === 'member';
+}
+
 // Prehandler factory: checks orgMember.role against allowed roles
 export function requireRole(...roles: string[]) {
   return async (request: FastifyRequest, reply: FastifyReply) => {

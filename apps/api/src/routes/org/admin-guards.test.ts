@@ -138,8 +138,9 @@ describe('member roles', () => {
     expect((await invite(OWNER, 'owner')).statusCode).toBe(201);
   });
 
-  it('lets an admin invite admins and members', async () => {
+  it('lets an admin invite admins, maintainers and members', async () => {
     expect((await invite(ADMIN, 'admin')).statusCode).toBe(201);
+    expect((await invite(ADMIN, 'maintainer')).statusCode).toBe(201);
     expect((await invite(ADMIN, 'member')).statusCode).toBe(201);
   });
 

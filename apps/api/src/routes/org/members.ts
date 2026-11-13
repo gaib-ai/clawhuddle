@@ -26,7 +26,7 @@ export function maxGatewaysProblem(value: unknown): string | null {
   return null;
 }
 
-export const ROLES = ['owner', 'admin', 'member'];
+export const ROLES = ['owner', 'admin', 'maintainer', 'member'];
 const STATUSES = ['active', 'disabled'];
 
 export async function orgMemberRoutes(app: FastifyInstance) {
@@ -58,7 +58,13 @@ export async function orgMemberRoutes(app: FastifyInstance) {
       m.container_id = m.gateways.find((g: any) => g.slot === 1)?.container_id ?? null;
     }
 
-    return { data: members.map((m) => withoutOthersGatewayToken(m, request.currentUser!.id)) };
+    // A maintainer only sees the plain members they look after, and themselves.
+    const viewerId = request.currentUser!.id;
+    const visible = request.orgMember!.role === 'maintainer'
+      ? members.filter((m) => m.role === 'member' || m.user_id === viewerId)
+      : members;
+
+    return { data: visible.map((m) => withoutOthersGatewayToken(m, viewerId)) };
   });
 
   // Invite member (admin+ only)

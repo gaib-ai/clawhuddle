@@ -32,6 +32,7 @@ The API never trusts a client-supplied user id. Both apps share `API_AUTH_SECRET
 - Instance naming is in `services/gateway-store.ts`: slot 1 keeps the pre-instance container name `clawhuddle-gw-<org8>-<user8>` and data dir `data/gateways/<orgId>/<userId>`; slot N≥2 adds `-N` to both. `org_members.gateway_*` only mirror the slot-1 row (for rollback) — never read them. All `gateways` writes go through the store so the mirror stays right. `migrate.ts` re-runs every migration on each boot; one-shot backfills are guarded by `migration_marks` (see `020-gateways.sql`).
 - Port-forward Traefik files are written with `JSON.stringify` (JSON is valid YAML) — never interpolate request input into them.
 - Only owners can grant the owner role, including through invitations (checked when sent and again when accepted); roles and statuses are validated against fixed lists.
+- Roles: `owner` > `admin` > `maintainer` > `member`. A maintainer sees only the Members page (`/admin`; other admin pages redirect), and `GET /members` returns them only `member` rows plus their own. They manage plain members' instances (deploy, start/stop/restart/redeploy, open via `/access`, channels, usage — but remove only their own instances; `canManageGatewaysOf` in `middleware/auth.ts`) but cannot invite, change roles, statuses or limits, see keys, or touch an admin's or owner's instance.
 
 ## Claw Proxy Integration
 

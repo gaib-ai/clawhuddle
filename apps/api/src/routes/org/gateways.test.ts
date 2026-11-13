@@ -728,3 +728,75 @@ describe('Google sign-in from the Home card', () => {
   });
 });
 
+
+describe('maintainers', () => {
+  const MAINT = { id: 'user-maint', email: 'maint@example.com' };
+  const PLAIN = { id: 'user-plain', email: 'plain@example.com' };
+  const req = async (by: { id: string }, method: 'GET' | 'POST' | 'PATCH' | 'DELETE', url: string, payload?: object) =>
+    app.inject({ method, url: `/api/orgs/${ORG}${url}`, headers: await as(by), ...(payload ? { payload } : {}) });
+
+  beforeAll(async () => {
+    const { getDb } = await import('../../db/index.js');
+    const db = getDb();
+    for (const u of [MAINT, PLAIN]) db.prepare('INSERT INTO users (id, email) VALUES (?, ?)').run(u.id, u.email);
+    db.prepare("INSERT INTO org_members (id, org_id, user_id, role) VALUES (?, ?, ?, 'member')").run(om(PLAIN), ORG, PLAIN.id);
+    db.prepare("INSERT INTO org_members (id, org_id, user_id, role) VALUES (?, ?, ?, 'member')").run(om(MAINT), ORG, MAINT.id);
+  });
+
+  it('can be granted by an admin', async () => {
+    const res = await req(ADMIN, 'PATCH', `/members/${om(MAINT)}`, { role: 'maintainer' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.role).toBe('maintainer');
+  });
+
+  it('sees only plain members and themselves in the members list', async () => {
+    const roles = (await req(MAINT, 'GET', '/members')).json().data.map((m: any) => [m.user_id, m.role]);
+    expect(roles).toContainEqual([PLAIN.id, 'member']);
+    expect(roles).toContainEqual([MAINT.id, 'maintainer']);
+    expect(roles.some(([, r]: string[]) => r === 'owner' || r === 'admin')).toBe(false);
+  });
+
+  it("deploys and runs a plain member's instance, and may open it", async () => {
+    const created = await req(MAINT, 'POST', `/gateways/members/${om(PLAIN)}`, {});
+    expect(created.statusCode).toBe(201);
+    const id = created.json().data.id;
+    expect((await req(MAINT, 'POST', `/gateways/${id}/stop`)).statusCode).toBe(200);
+    expect((await req(MAINT, 'POST', `/gateways/${id}/redeploy`)).statusCode).toBe(200);
+    expect((await req(MAINT, 'DELETE', `/gateways/${id}`)).statusCode).toBe(403);
+    expect((await mine(PLAIN)).data).toHaveLength(1);
+    const access = await req(MAINT, 'GET', `/gateways/${id}/access`);
+    expect(access.statusCode).toBe(200);
+    expect(access.json().data.gateway_token).toBe((await mine(PLAIN)).data[0].token);
+  });
+
+  it("is kept off admins' and owners' instances", async () => {
+    for (const target of [ADMIN, OWNER]) {
+      const theirs = (await mine(target)).data[0].id;
+      for (const [method, suffix] of [['GET', '/status'], ['POST', '/stop'], ['GET', '/access'], ['GET', '/channels'], ['DELETE', '']] as const) {
+        expect((await req(MAINT, method, `/gateways/${theirs}${suffix}`)).statusCode, `${target.id} ${method} ${suffix}`).toBe(403);
+      }
+      expect((await req(MAINT, 'POST', `/gateways/members/${om(target)}`, {})).statusCode).toBe(403);
+    }
+  });
+
+  it('still runs their own instance', async () => {
+    expect((await req(MAINT, 'POST', `/gateways/members/${om(MAINT)}`, {})).statusCode).toBe(201);
+    const own = (await mine(MAINT)).data[0].id;
+    expect((await req(MAINT, 'POST', `/gateways/${own}/stop`)).statusCode).toBe(200);
+    expect((await req(MAINT, 'DELETE', `/gateways/${own}`)).statusCode).toBe(200);
+    expect((await mine(MAINT)).data).toHaveLength(0);
+  });
+
+  it('cannot invite, change members, or reach the other admin routes', async () => {
+    expect((await req(MAINT, 'POST', '/members/invite', { email: 'x@example.com', role: 'member' })).statusCode).toBe(403);
+    expect((await req(MAINT, 'GET', '/members/invitations')).statusCode).toBe(403);
+    for (const payload of [{ role: 'admin' }, { status: 'disabled' }, { max_gateways: 3 }]) {
+      expect((await req(MAINT, 'PATCH', `/members/${om(PLAIN)}`, payload)).statusCode).toBe(403);
+    }
+    expect((await req(MAINT, 'DELETE', `/members/${om(PLAIN)}`)).statusCode).toBe(403);
+    expect((await req(MAINT, 'GET', '/gateways')).statusCode).toBe(403);
+    expect((await req(MAINT, 'POST', '/gateways/redeploy-all')).statusCode).toBe(403);
+    expect((await req(MAINT, 'GET', '/device-requests')).statusCode).toBe(403);
+    expect((await req(MAINT, 'GET', '/api-keys')).statusCode).toBe(403);
+  });
+});
