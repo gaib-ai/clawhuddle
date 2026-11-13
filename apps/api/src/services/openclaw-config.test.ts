@@ -343,3 +343,54 @@ describe('secret-store providers (Notion)', () => {
   });
 });
 
+
+describe('platform instructions hook (2026-11-13)', () => {
+  const ENTRY = 'bootstrap-extra-files';
+  const PATH = '.clawhuddle/AGENTS.md';
+  type Any = Record<string, any>;
+  const merge = (existing: Any) =>
+    mergeOpenClawConfig(existing as Parameters<typeof mergeOpenClawConfig>[0], base) as unknown as Any;
+  const withHooks = (hooks: unknown): Any => ({ ...(generateOpenClawConfig(base) as unknown as Any), hooks });
+
+  it('loads our file via a named entry only, without the master flag (no other hook is switched on)', () => {
+    const cfg = generateOpenClawConfig(base) as unknown as Any;
+    expect(cfg.hooks).toEqual({ internal: { entries: { [ENTRY]: { enabled: true, paths: [PATH] } } } });
+  });
+
+  it('adds the entry to a config without hooks, once', () => {
+    const existing = withHooks(undefined);
+    delete existing.hooks;
+    const once = merge(existing);
+    expect(once.hooks.internal.entries[ENTRY]).toEqual({ enabled: true, paths: [PATH] });
+    expect(once.hooks.internal).not.toHaveProperty('enabled');
+    expect(merge(once).hooks.internal.entries[ENTRY].paths).toEqual([PATH]);
+  });
+
+  it("keeps the member's other hooks, webhook settings and own paths", () => {
+    const merged = merge(withHooks({
+      enabled: true,
+      token: 'webhook-token',
+      internal: { entries: { 'command-logger': { enabled: true }, [ENTRY]: { paths: ['packages/*/AGENTS.md'] } } },
+    }));
+    expect(merged.hooks.enabled).toBe(true);
+    expect(merged.hooks.token).toBe('webhook-token');
+    expect(merged.hooks.internal.entries['command-logger']).toEqual({ enabled: true });
+    expect(merged.hooks.internal.entries[ENTRY]).toEqual({ enabled: true, paths: ['packages/*/AGENTS.md', PATH] });
+  });
+
+  it('joins the list the member uses when it is patterns rather than paths', () => {
+    const merged = merge(withHooks({ internal: { entries: { [ENTRY]: { enabled: true, patterns: ['docs/AGENTS.md'] } } } }));
+    expect(merged.hooks.internal.entries[ENTRY]).toEqual({ enabled: true, patterns: ['docs/AGENTS.md', PATH] });
+  });
+
+  it('leaves hooks alone when the member turned them or our hook off, or relies on open-ended discovery', () => {
+    for (const hooks of [
+      { internal: { enabled: false } },
+      { internal: { entries: { [ENTRY]: { enabled: false } } } },
+      { internal: { enabled: true } },
+      { internal: { enabled: true, entries: { 'session-memory': { enabled: false } } } },
+    ]) {
+      expect(merge(withHooks(hooks)).hooks).toEqual(hooks);
+    }
+  });
+});

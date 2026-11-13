@@ -5,7 +5,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { getDb } from "../db/index.js";
 import { getResolvedApiKeysForMember } from "../routes/org/api-keys.js";
-import { generateOpenClawConfig, mergeOpenClawConfig } from "./openclaw-config.js";
+import { generateOpenClawConfig, mergeOpenClawConfig, PLATFORM_INSTRUCTIONS_PATH } from "./openclaw-config.js";
+import { renderPlatformInstructions } from "./platform-instructions.js";
 import { installSkillsForUser } from "./skill-installer.js";
 import { removePortForwardsForGateway, removePortForwardsForOrg } from "./port-forward.js";
 import {
@@ -401,6 +402,8 @@ async function syncGatewaySecrets(g: GatewayRow): Promise<void> {
     .catch((err) => console.warn(`[gateway] secret store sync failed for ${refLabel(g)}:`, err));
   await syncGogClient(g, containerName)
     .catch((err) => console.warn(`[gateway] gog client setup failed for ${refLabel(g)}:`, err));
+  // Either step may have changed what the instructions can promise.
+  writePlatformInstructions(getGatewayRow(g.org_id, g.id));
 }
 
 async function syncSecretStore(g: GatewayRow, containerName: string): Promise<void> {
@@ -874,6 +877,26 @@ function writeOpenClawConfig(g: GatewayRow, options: ReturnType<typeof configOpt
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
   markSlackAccessMigrated(g.id);
+  writePlatformInstructions(g);
+}
+
+/**
+ * (Re)write the platform's instructions file in the workspace from what this
+ * instance has now. Read by OpenClaw at the start of each new session, so no
+ * restart is needed. Never throws: a missing note must not fail a deploy.
+ */
+function writePlatformInstructions(g: GatewayRow): void {
+  try {
+    const notion = (secretRefsFor(g) ?? []).some((r) => r.skill === "notion");
+    const gog = gogClientState(g, writeAuthProfiles(g, false).gogClient);
+    const content = renderPlatformInstructions({ notion, google: gog === "injected" || gog === "member" });
+    const file = path.join(getGatewayDir(g), "workspace", PLATFORM_INSTRUCTIONS_PATH);
+    if (fs.existsSync(file) && fs.readFileSync(file, "utf-8") === content) return;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, content);
+  } catch (err) {
+    console.warn(`[gateway] platform instructions not written for ${refLabel(g)}:`, err);
+  }
 }
 
 /**

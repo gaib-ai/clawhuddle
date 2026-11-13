@@ -135,6 +135,17 @@ const SESSION_DEFAULTS: NonNullable<OpenClawConfig['session']> = { dmScope: 'per
 const SECRETS_DEFAULTS: NonNullable<OpenClawConfig['secrets']> = { egressProxy: { enabled: true } };
 
 /**
+ * Platform instructions (Notion, Google, ...) live in a file of ours inside
+ * the workspace, written by gateway.ts on every deploy and secret sync. The
+ * bundled `bootstrap-extra-files` hook adds it to each new session's Project
+ * Context next to the member's own AGENTS.md, which stays theirs. Path is
+ * relative to the workspace; the hook only loads these basenames
+ * (AGENTS.md, SOUL.md, ...), hence the name.
+ */
+export const PLATFORM_INSTRUCTIONS_PATH = '.clawhuddle/AGENTS.md';
+const BOOTSTRAP_HOOK = 'bootstrap-extra-files';
+
+/**
  * Who may reach a member's agent over Slack. The agent has a shell and the
  * member's credentials, so it must not take turns from anyone in the workspace
  * (Slack Connect guests included) or from other bots. These are OpenClaw's own
@@ -287,6 +298,13 @@ export interface OpenClawConfig {
     entries?: Record<string, { enabled?: boolean; apiKey?: { source: 'store'; provider: string; id: string } }>;
   };
   secrets?: { egressProxy?: { enabled: boolean; allowedHosts?: string[]; bypassHosts?: string[] } };
+  /** Internal (directory-loaded) hooks. The platform only writes its `bootstrap-extra-files` path. */
+  hooks?: {
+    internal?: {
+      enabled?: boolean;
+      entries?: Record<string, { enabled?: boolean; paths?: string[]; patterns?: string[]; files?: string[] }>;
+    };
+  };
   plugins: {
     entries: Record<string, { enabled: boolean }>;
   };
@@ -555,6 +573,9 @@ export function generateOpenClawConfig(options: {
   config.messages = JSON.parse(JSON.stringify(MESSAGES_DEFAULTS));
   config.session = JSON.parse(JSON.stringify(SESSION_DEFAULTS));
   config.secrets = JSON.parse(JSON.stringify(SECRETS_DEFAULTS));
+  // A named entry with no master flag is an allowlist of one: no other bundled
+  // hook (boot-md, session-memory, ...) is switched on by this.
+  config.hooks = { internal: { entries: { [BOOTSTRAP_HOOK]: { enabled: true, paths: [PLATFORM_INSTRUCTIONS_PATH] } } } };
 
   // Configure channel tokens (e.g. Telegram bot token)
   const ct = options.channelTokens;
@@ -697,6 +718,7 @@ export function mergeOpenClawConfig(
   overlayBlock(merged, 'messages', generated.messages);
   overlayBlock(merged, 'session', generated.session);
   overlayBlock(merged, 'secrets', generated.secrets);
+  addPlatformInstructionsHook(merged);
   // Skill store refs: only the apiKey leaf of the named skills is ours; a ref
   // we no longer emit (entry gone from the store) is removed so the gateway
   // does not fail its next reload on it.
@@ -725,6 +747,40 @@ export function mergeOpenClawConfig(
   }
 
   return merged as unknown as OpenClawConfig;
+}
+
+/**
+ * Make sure the member's hooks config loads our instructions file, without
+ * taking anything of theirs away:
+ *  - hooks switched off (`internal.enabled: false`) or our hook disabled by
+ *    them (`enabled: false`): left as is;
+ *  - master flag on with no named entries is open-ended discovery of every
+ *    bundled hook, and adding the first named entry would narrow it to ours,
+ *    so it is left as is too;
+ *  - otherwise our path joins whichever list the entry already uses (the hook
+ *    reads `paths`, else `patterns`, else `files`; they are not merged).
+ */
+function addPlatformInstructionsHook(merged: Record<string, unknown>): void {
+  const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+  if (merged.hooks !== undefined && !isObj(merged.hooks)) return;
+  const hooks = (merged.hooks ?? {}) as Record<string, unknown>;
+  if (hooks.internal !== undefined && !isObj(hooks.internal)) return;
+  const internal = (hooks.internal ?? {}) as Record<string, unknown>;
+  if (internal.enabled === false) return;
+  if (internal.entries !== undefined && !isObj(internal.entries)) return;
+  const entries = (internal.entries ?? {}) as Record<string, unknown>;
+  const extraDirs = isObj(internal.load) && Array.isArray(internal.load.extraDirs) ? internal.load.extraDirs : [];
+  const named = Object.values(entries).filter((e) => !(isObj(e) && e.enabled === false));
+  if (internal.enabled === true && named.length === 0 && extraDirs.length === 0) return;
+  const current = entries[BOOTSTRAP_HOOK];
+  if (current !== undefined && !isObj(current)) return;
+  const entry = { ...((current ?? {}) as Record<string, unknown>) };
+  if (entry.enabled === false) return;
+  entry.enabled = true;
+  const listKey = (['paths', 'patterns', 'files'] as const).find((k) => Array.isArray(entry[k]) && (entry[k] as unknown[]).length > 0) ?? 'paths';
+  const list = Array.isArray(entry[listKey]) ? (entry[listKey] as unknown[]) : [];
+  if (!list.includes(PLATFORM_INSTRUCTIONS_PATH)) entry[listKey] = [...list, PLATFORM_INSTRUCTIONS_PATH];
+  merged.hooks = { ...hooks, internal: { ...internal, entries: { ...entries, [BOOTSTRAP_HOOK]: entry } } };
 }
 
 /** True when `value` is unset or equals (key order aside) one of the values the platform has written. */
