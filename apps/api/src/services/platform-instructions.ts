@@ -21,6 +21,14 @@ export function renderPlatformInstructions(facts: PlatformInstructionFacts): str
     '# ClawHuddle platform notes',
     '',
     'Written by ClawHuddle, the platform that runs this instance, and rewritten on every deploy. Put your own notes in the workspace AGENTS.md, not here.',
+    '',
+    '## Staying quiet',
+    '',
+    // 2026-11-16: a Gemini Flash agent wrapped its silence in HTML comments
+    // (`<!-- NO_REPLY -->`, `<!-- openclaw:no-reply -->`, `<!-- silent -->`,
+    // `<!-- standing by silently … -->`), 31 times in 3 weeks; OpenClaw only
+    // suppresses the bare token, so each one was posted to Slack.
+    'When you decide not to answer in a chat, your entire reply must be exactly `NO_REPLY`, with nothing before or after it. Anything else is posted to the chat as a message, including an HTML comment such as `<!-- NO_REPLY -->` or `<!-- silent -->`, a note on why you are staying quiet, or an empty code block.',
   ];
 
   if (facts.notion) {

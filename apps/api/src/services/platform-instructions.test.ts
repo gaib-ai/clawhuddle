@@ -17,6 +17,15 @@ describe('renderPlatformInstructions', () => {
     expect(text).not.toContain('## Notion');
   });
 
+  it('always tells the agent to stay quiet with the bare NO_REPLY token, not an HTML comment', () => {
+    for (const facts of [{ notion: false, google: false }, { notion: true, google: true }]) {
+      const text = renderPlatformInstructions(facts);
+      expect(text).toContain('## Staying quiet');
+      expect(text).toContain('exactly `NO_REPLY`');
+      expect(text).toContain('`<!-- NO_REPLY -->`');
+    }
+  });
+
   it('says nothing is set up rather than promising an integration', () => {
     const text = renderPlatformInstructions({ notion: false, google: false });
     expect(text).not.toContain('## Notion');
