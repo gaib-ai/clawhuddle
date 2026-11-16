@@ -4,6 +4,14 @@
 # socat bridges external Docker network traffic (0.0.0.0:6101) to loopback.
 socat TCP-LISTEN:6101,fork,bind=0.0.0.0,reuseaddr TCP:127.0.0.1:6100 &
 
+# SSH keys live in the mounted state dir (~/.openclaw/ssh: key, config,
+# known_hosts) because /root/.ssh is not persisted; point ~/.ssh at it on every
+# boot so plain `ssh <host>` keeps working across redeploys. Never replaces an
+# existing ~/.ssh.
+if [ -d "$HOME/.openclaw/ssh" ] && [ ! -e "$HOME/.ssh" ] && [ ! -L "$HOME/.ssh" ]; then
+  ln -s "$HOME/.openclaw/ssh" "$HOME/.ssh"
+fi
+
 # Auto-fix legacy config keys (e.g. tools.web.search → plugins.entries.*.config.webSearch)
 openclaw doctor --fix 2>/dev/null || true
 
