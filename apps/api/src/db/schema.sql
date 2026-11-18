@@ -144,3 +144,10 @@ CREATE TABLE IF NOT EXISTS usage_logs (
     org_id TEXT REFERENCES organizations(id),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Latest nightly Admin → Usage snapshot per org (services/usage.ts; only one kept)
+CREATE TABLE IF NOT EXISTS usage_snapshots (
+    org_id TEXT PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
+    taken_at TEXT NOT NULL,
+    data TEXT NOT NULL
+);

@@ -189,6 +189,22 @@ export interface GatewayUsage {
   daily: { date: string; tokens: number; cost: number; messages: number; errors: number }[];
 }
 
+/** Admin → Usage scopes, held in the nightly snapshot: the last 7 / 30 days and the current month, each ending on the last complete day. */
+export const USAGE_SCOPES = ['7d', '30d', 'month'] as const;
+export type UsageScope = (typeof USAGE_SCOPES)[number];
+
+/** The latest nightly usage snapshot of an org (only one is kept). */
+export interface UsageSnapshot {
+  /** When it finished, ISO. */
+  takenAt: string;
+  /** Local date (in `timeZone`) it was taken for; every scope ends the day before. */
+  forDate: string;
+  timeZone: string;
+  windows: Record<UsageScope, { startDate: string; endDate: string }>;
+  /** Instances that were running when it was taken, by gateway id. */
+  gateways: Record<string, { usage?: Record<UsageScope, GatewayUsage>; error?: string }>;
+}
+
 export interface User {
   id: string;
   email: string;

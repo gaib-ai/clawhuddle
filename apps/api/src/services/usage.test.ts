@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { condenseSessionsUsage, parseCliJson, usageWindow } from './usage.js';
+import { condenseSessionsUsage, localClock, parseCliJson, snapshotWindows, usageWindow } from './usage.js';
 
 const t = (totalTokens: number, totalCost = 0, extra: Record<string, number> = {}) => ({
   input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens, totalCost, missingCostEntries: 0, ...extra,
@@ -92,5 +92,26 @@ describe('parseCliJson', () => {
   });
   it('fails clearly on no JSON', () => {
     expect(() => parseCliJson('gateway closed')).toThrow(/no usage data/);
+  });
+});
+
+describe('nightly snapshot windows', () => {
+  it('reads the clock in the snapshot time zone, not UTC', () => {
+    // 17:00 UTC on Nov 17 is 01:00 on Nov 18 in UTC+8.
+    expect(localClock(new Date('2026-11-17T17:00:00Z'), 'Asia/Singapore')).toEqual({ date: '2026-11-18', hour: 1 });
+    expect(localClock(new Date('2026-11-17T16:59:00Z'), 'Asia/Singapore')).toEqual({ date: '2026-11-18', hour: 0 });
+  });
+
+  it('ends every scope on the last complete day', () => {
+    expect(snapshotWindows('2026-11-18')).toEqual({
+      '7d': { startDate: '2026-11-11', endDate: '2026-11-17' },
+      '30d': { startDate: '2026-10-19', endDate: '2026-11-17' },
+      month: { startDate: '2026-11-01', endDate: '2026-11-17' },
+    });
+  });
+
+  it('gives the whole previous month on the 1st', () => {
+    expect(snapshotWindows('2026-12-01').month).toEqual({ startDate: '2026-11-01', endDate: '2026-11-30' });
+    expect(snapshotWindows('2027-01-01')['7d']).toEqual({ startDate: '2026-12-25', endDate: '2026-12-31' });
   });
 });

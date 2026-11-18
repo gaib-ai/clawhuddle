@@ -14,6 +14,7 @@ import { orgChatRoutes } from './routes/org/chat.js';
 import { orgPortForwardRoutes } from './routes/org/port-forwards.js';
 import { superAdminRoutes } from './routes/super-admin.js';
 import { syncAllPortForwards } from './services/port-forward.js';
+import { startUsageSnapshotScheduler } from './services/usage.js';
 
 // Refuse to start without the secret API tokens are verified with
 getApiAuthSecret();
@@ -48,6 +49,7 @@ await app.register(async function orgScopedRoutes(instance) {
 
 // Regenerate traefik config files for stored port forwards
 syncAllPortForwards();
+startUsageSnapshotScheduler(app.log);
 
 app.get('/api/health', async () => {
   return { status: 'ok', timestamp: new Date().toISOString() };

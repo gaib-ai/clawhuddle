@@ -35,7 +35,7 @@ import {
   type GatewayRow,
 } from '../../services/gateway-store.js';
 import { PROVIDER_IDS, MODEL_IDS, USAGE_RANGES, type CreateGatewayRequest, type UpdateGatewayRequest } from '@clawhuddle/shared';
-import { getGatewayUsage } from '../../services/usage.js';
+import { getGatewayUsage, getUsageSnapshot, isUsageSnapshotRunning, takeUsageSnapshot } from '../../services/usage.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -482,6 +482,28 @@ export async function orgGatewayRoutes(app: FastifyInstance) {
         request.log.warn({ gatewayId: g.id, err: err?.message }, 'usage read failed');
         return reply.status(502).send({ error: 'usage_unavailable', message: err?.message || 'Could not read usage' });
       }
+    },
+  );
+
+  // Admin → Usage reads the org's latest nightly snapshot (services/usage.ts)
+  // instead of asking every instance live. POST takes a new one now, in the
+  // background (a CLI run per instance and scope); the page polls GET.
+  app.get(
+    '/api/orgs/:orgId/usage/snapshot',
+    { preHandler: requireRole('owner', 'admin') },
+    async (request) => ({ data: getUsageSnapshot(request.orgId!), running: isUsageSnapshotRunning(request.orgId!) }),
+  );
+
+  app.post(
+    '/api/orgs/:orgId/usage/snapshot',
+    { preHandler: requireRole('owner', 'admin') },
+    async (request, reply) => {
+      const orgId = request.orgId!;
+      if (!isUsageSnapshotRunning(orgId)) {
+        request.log.info({ orgId, by: request.orgMember!.id }, 'usage snapshot requested');
+        takeUsageSnapshot(orgId).catch((err) => request.log.warn({ orgId, err: err?.message }, 'usage snapshot failed'));
+      }
+      return reply.status(202).send({ running: true });
     },
   );
 

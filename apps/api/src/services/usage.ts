@@ -9,9 +9,10 @@
  * so complete results are cached for a few minutes and at most a few run at
  * once across the whole API.
  */
-import type { GatewayUsage, UsageTotals } from "@clawhuddle/shared";
+import { USAGE_SCOPES, type GatewayUsage, type UsageScope, type UsageSnapshot, type UsageTotals } from "@clawhuddle/shared";
+import { getDb } from "../db/index.js";
 import { execInContainer } from "./gateway.js";
-import { containerNameFor, type GatewayRow } from "./gateway-store.js";
+import { containerNameFor, listOrgGateways, type GatewayRow } from "./gateway-store.js";
 
 const FRESH_TTL_MS = 5 * 60_000;
 const MAX_CONCURRENT = 3;
@@ -131,9 +132,16 @@ export function parseCliJson(stdout: string): any {
   return JSON.parse(stdout.slice(start));
 }
 
-async function fetchUsage(g: GatewayRow, days: number): Promise<GatewayUsage> {
-  const window = usageWindow(days);
-  const params = JSON.stringify({ ...window, agentScope: "all", limit: 1 });
+type UsageDates = { startDate: string; endDate: string };
+
+/** One `sessions.usage` run. With a time zone, days (and the window) are that zone's calendar days, not UTC's. */
+async function fetchUsageWindow(g: GatewayRow, window: UsageDates, timeZone?: string): Promise<GatewayUsage> {
+  const params = JSON.stringify({
+    ...window,
+    ...(timeZone ? { mode: "specific", timeZone } : {}),
+    agentScope: "all",
+    limit: 1,
+  });
   const stdout = await withSlot(() =>
     execInContainer(
       containerNameFor(g),
@@ -142,6 +150,10 @@ async function fetchUsage(g: GatewayRow, days: number): Promise<GatewayUsage> {
     ),
   );
   return condenseSessionsUsage(g.id, parseCliJson(stdout), window);
+}
+
+function fetchUsage(g: GatewayRow, days: number): Promise<GatewayUsage> {
+  return fetchUsageWindow(g, usageWindow(days));
 }
 
 /**
@@ -167,4 +179,144 @@ export async function getGatewayUsage(g: GatewayRow, days: number, opts: { refre
     .finally(() => inflight.delete(key));
   inflight.set(key, p);
   return p;
+}
+
+// ---------------------------------------------------------------------------
+// Nightly snapshot for Admin → Usage.
+//
+// Reading every instance live costs a CLI run per instance and range, during
+// the working day. Instead one snapshot per org is taken at 01:00 in
+// USAGE_TIME_ZONE (UTC+8 by default) and the page shows that. Each scope ends
+// on the last complete day (yesterday, local time); `month` is the 1st of that
+// day's month to it, so the snapshot taken on the 1st holds the whole previous
+// month. Only the latest snapshot is kept (one row per org).
+// ---------------------------------------------------------------------------
+
+/** Time zone the snapshot's calendar days are counted in. */
+export const USAGE_TIME_ZONE = process.env.USAGE_TIME_ZONE || "Asia/Singapore";
+/** Local hours in which the nightly snapshot may start (01:00, with catch-up until 05:59 if the API was down). */
+const SNAPSHOT_HOURS = [1, 2, 3, 4, 5];
+const SNAPSHOT_CHECK_MS = 5 * 60_000;
+/** OpenClaw re-indexes transcripts after a restart; wait for a complete answer before storing one. */
+const SNAPSHOT_INCOMPLETE_RETRY_MS = [10_000, 20_000, 40_000];
+
+/** Calendar date and hour of `now` in `timeZone`. */
+export function localClock(now: Date, timeZone: string): { date: string; hour: number } {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hourCycle: "h23" })
+      .formatToParts(now)
+      .map((p) => [p.type, p.value]),
+  );
+  return { date: `${parts.year}-${parts.month}-${parts.day}`, hour: Number(parts.hour) };
+}
+
+function shiftDate(date: string, days: number): string {
+  return new Date(Date.parse(`${date}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
+}
+
+/** The snapshot scopes as of local date `today`, each ending on the day before it. */
+export function snapshotWindows(today: string): Record<UsageScope, UsageDates> {
+  const end = shiftDate(today, -1);
+  return {
+    "7d": { startDate: shiftDate(end, -6), endDate: end },
+    "30d": { startDate: shiftDate(end, -29), endDate: end },
+    month: { startDate: `${end.slice(0, 8)}01`, endDate: end },
+  };
+}
+
+async function completeUsage(g: GatewayRow, window: UsageDates, timeZone: string): Promise<GatewayUsage> {
+  let usage = await fetchUsageWindow(g, window, timeZone);
+  for (const wait of SNAPSHOT_INCOMPLETE_RETRY_MS) {
+    if (usage.cacheStatus === "fresh") break;
+    await new Promise((r) => setTimeout(r, wait));
+    usage = await fetchUsageWindow(g, window, timeZone);
+  }
+  return usage;
+}
+
+const snapshotsRunning = new Set<string>();
+
+export function isUsageSnapshotRunning(orgId: string): boolean {
+  return snapshotsRunning.has(orgId);
+}
+
+export function getUsageSnapshot(orgId: string): UsageSnapshot | null {
+  const row = getDb().prepare("SELECT data FROM usage_snapshots WHERE org_id = ?").get(orgId) as { data: string } | undefined;
+  return row ? (JSON.parse(row.data) as UsageSnapshot) : null;
+}
+
+/**
+ * Read every running instance of the org for each scope and replace the org's
+ * stored snapshot. Instances are read one scope at a time through the shared
+ * CLI slots, so at most MAX_CONCURRENT runs happen at once API-wide. Returns
+ * null when a snapshot of this org is already being taken.
+ */
+export async function takeUsageSnapshot(orgId: string, now = new Date(), timeZone = USAGE_TIME_ZONE): Promise<UsageSnapshot | null> {
+  if (snapshotsRunning.has(orgId)) return null;
+  snapshotsRunning.add(orgId);
+  try {
+    const { date } = localClock(now, timeZone);
+    const windows = snapshotWindows(date);
+    const gateways: UsageSnapshot["gateways"] = {};
+    const running = listOrgGateways(orgId).filter((g) => g.status === "running");
+    await Promise.all(
+      running.map(async (g) => {
+        try {
+          const usage = {} as Record<UsageScope, GatewayUsage>;
+          for (const scope of USAGE_SCOPES) usage[scope] = await completeUsage(g, windows[scope], timeZone);
+          gateways[g.id] = { usage };
+        } catch (err: any) {
+          gateways[g.id] = { error: err?.message || "Could not read usage" };
+        }
+      }),
+    );
+    const snapshot: UsageSnapshot = { takenAt: new Date().toISOString(), forDate: date, timeZone, windows, gateways };
+    getDb()
+      .prepare(
+        `INSERT INTO usage_snapshots (org_id, taken_at, data) VALUES (?, ?, ?)
+         ON CONFLICT(org_id) DO UPDATE SET taken_at = excluded.taken_at, data = excluded.data`,
+      )
+      .run(orgId, snapshot.takenAt, JSON.stringify(snapshot));
+    return snapshot;
+  } finally {
+    snapshotsRunning.delete(orgId);
+  }
+}
+
+/** Orgs with at least one instance whose stored snapshot is not from local date `today`. */
+function orgsDueForSnapshot(today: string): string[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT DISTINCT g.org_id, s.data FROM gateways g
+       LEFT JOIN usage_snapshots s ON s.org_id = g.org_id`,
+    )
+    .all() as { org_id: string; data: string | null }[];
+  return rows
+    .filter((r) => {
+      if (!r.data) return true;
+      try {
+        return (JSON.parse(r.data) as UsageSnapshot).forDate !== today;
+      } catch {
+        return true;
+      }
+    })
+    .map((r) => r.org_id);
+}
+
+/** Check every few minutes; between 01:00 and 05:59 local, snapshot each org that has none for today yet. */
+export function startUsageSnapshotScheduler(log: { info: (o: object, m: string) => void; warn: (o: object, m: string) => void }): void {
+  const tick = async () => {
+    const { date, hour } = localClock(new Date(), USAGE_TIME_ZONE);
+    if (!SNAPSHOT_HOURS.includes(hour)) return;
+    for (const orgId of orgsDueForSnapshot(date)) {
+      try {
+        const s = await takeUsageSnapshot(orgId);
+        if (s) log.info({ orgId, instances: Object.keys(s.gateways).length }, "usage snapshot taken");
+      } catch (err: any) {
+        log.warn({ orgId, err: err?.message }, "usage snapshot failed");
+      }
+    }
+  };
+  setInterval(() => void tick(), SNAPSHOT_CHECK_MS).unref();
+  void tick();
 }

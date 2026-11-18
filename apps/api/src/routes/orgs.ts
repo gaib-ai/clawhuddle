@@ -15,6 +15,7 @@ export function purgeOrgFromDb(db: any, orgId: string) {
   db.prepare('DELETE FROM api_keys WHERE org_id = ?').run(orgId);
   db.prepare('UPDATE usage_logs SET org_id = NULL WHERE org_id = ?').run(orgId);
   db.prepare('DELETE FROM port_forwards WHERE org_id = ?').run(orgId);
+  db.prepare('DELETE FROM usage_snapshots WHERE org_id = ?').run(orgId);
   db.prepare('DELETE FROM org_members WHERE org_id = ?').run(orgId); // cascades gateways, gateway_channels, member_channels
   db.prepare('DELETE FROM organizations WHERE id = ?').run(orgId);
 }
