@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
+import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,6 +17,8 @@ const docker = vi.hoisted(() => ({
   created: [] as string[],
   /** Container names handed to `restart`. */
   restarted: [] as string[],
+  stopped: [] as string[],
+  started: [] as string[],
   /** Every `exec` Cmd, in order. */
   execs: [] as string[][],
   /** What `openclaw devices list --json` prints inside the stub container. */
@@ -24,6 +27,12 @@ const docker = vi.hoisted(() => ({
   pendingCheck: { stdout: '', exitCode: 0 },
   /** stdout for `sh -c <script>` execs, picked by a substring of the script. */
   shOutputs: {} as Record<string, string>,
+  /** Throwaway containers (created with an Entrypoint): their config, and what running one does. */
+  offline: [] as any[],
+  offlineRun: (_cfg: any): number => 0,
+  /** What a failed throwaway container printed. */
+  offlineOutput: 'cli said no\n',
+  removed: [] as string[],
 }));
 vi.mock('dockerode', () => {
   // A docker exec stream without a TTY is framed: type byte, 3 zero bytes,
@@ -36,10 +45,17 @@ vi.mock('dockerode', () => {
     return Buffer.concat([head, body]);
   };
   class Container {
-    constructor(public name: string) {}
-    async stop() {}
-    async remove() {}
-    async start() {}
+    exitCode = 0;
+    constructor(public name: string, public cfg?: any) {}
+    async stop() { docker.stopped.push(this.name); }
+    async remove() { docker.removed.push(this.name); }
+    async start() {
+      docker.started.push(this.name);
+      if (this.cfg?.Entrypoint) this.exitCode = docker.offlineRun(this.cfg);
+    }
+    async wait() { return { StatusCode: this.exitCode }; }
+    async kill() {}
+    async logs() { return frame(2, docker.offlineOutput); }
     async restart() { docker.restarted.push(this.name); }
     async inspect() {
       return { State: { Running: true }, NetworkSettings: { Ports: {} } };
@@ -71,7 +87,11 @@ vi.mock('dockerode', () => {
     getNetwork() { return { inspect: async () => ({}) }; }
     async createNetwork() {}
     getContainer(name: string) { return new Container(name); }
-    async createContainer(cfg: { name: string }) { docker.created.push(cfg.name); return new Container(cfg.name); }
+    async createContainer(cfg: { name: string; Entrypoint?: string[] }) {
+      if (cfg.Entrypoint) docker.offline.push(cfg);
+      else docker.created.push(cfg.name);
+      return new Container(cfg.name, cfg);
+    }
     async listContainers() { return []; }
   }
   return { default: Docker };
@@ -233,13 +253,164 @@ describe('who may touch an instance', () => {
   it('restarts an instance in place without recreating its container', async () => {
     const theirs = (await mine(OTHER)).data[0].id;
     const before = docker.created.length;
+    docker.stopped.length = 0;
+    docker.started.length = 0;
     const res = await app.inject({ method: 'POST', url: `/api/orgs/${ORG}/gateways/${theirs}/restart`, headers: await as(OTHER) });
     expect(res.statusCode).toBe(200);
     expect(res.json().data.status).toBe('deploying');
-    expect(docker.restarted).toEqual(['clawhuddle-gw-org-1-user-oth']);
+    // Stopped, auth store reconciled while it is down, started again — same container.
+    expect(docker.stopped).toEqual(['clawhuddle-gw-org-1-user-oth']);
+    expect(docker.started).toEqual(['clawhuddle-gw-org-1-user-oth']);
     expect(docker.created.length).toBe(before);
     const denied = await app.inject({ method: 'POST', url: `/api/orgs/${ORG}/gateways/${theirs}/restart`, headers: await as(MEMBER) });
     expect(denied.statusCode).toBe(403);
+  });
+
+  describe('a key replaced in ClawHuddle, on OpenClaw 11.x', () => {
+    // 11.x keeps credentials in the state database and never re-imports
+    // auth-profiles.json, so the changed key is saved with OpenClaw's own CLI
+    // in a throwaway container while the instance is down.
+    const dir = () => path.join(tmpDir, 'data', 'gateways', ORG, OTHER.id);
+    const statePath = () => path.join(dir(), 'state', 'openclaw.sqlite');
+    const setStored = (profiles: Record<string, unknown>) => {
+      fs.mkdirSync(path.dirname(statePath()), { recursive: true });
+      const db = new Database(statePath());
+      db.exec('CREATE TABLE IF NOT EXISTS config_machine_state (state_key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL)');
+      db.prepare('INSERT OR REPLACE INTO config_machine_state VALUES (?, ?, 1)').run('authProfiles.store', JSON.stringify({ version: 1, profiles }));
+      db.close();
+    };
+    const stored = () => {
+      const db = new Database(statePath(), { readonly: true });
+      const row = db.prepare("SELECT value_json FROM config_machine_state WHERE state_key = 'authProfiles.store'").get() as { value_json: string };
+      db.close();
+      return JSON.parse(row.value_json).profiles;
+    };
+    /** What `openclaw models auth paste-api-key` does: reads the key from stdin, saves the profile. */
+    const pasteApiKey = (seen: { mode?: number }) => (cfg: any): number => {
+      const [, , , , command, provider, profileId, file, agent] = cfg.Entrypoint as string[];
+      if (command !== 'paste-api-key') return 2;
+      const hostDir = cfg.HostConfig.Binds[0].split(':')[0];
+      // Like the real CLI: with several agents it wants to be told whose credentials these are.
+      const entries = JSON.parse(fs.readFileSync(path.join(hostDir, 'openclaw.json'), 'utf-8')).agents?.entries ?? {};
+      if (Object.keys(entries).length > 1 && !agent) return 1;
+      // Like the real CLI (AUTH_PROFILE_MIGRATION_REQUIRED): no save while a
+      // legacy auth-profiles.json is waiting to be imported.
+      if (fs.existsSync(path.join(hostDir, 'agents', 'main', 'agent', 'auth-profiles.json'))) return 1;
+      const hostFile = path.join(hostDir, path.basename(file));
+      seen.mode = fs.statSync(hostFile).mode & 0o777;
+      setStored({ ...stored(), [profileId]: { type: 'api_key', provider, key: fs.readFileSync(hostFile, 'utf-8') } });
+      return 0;
+    };
+    const restart = async () => {
+      const theirs = (await mine(OTHER)).data[0].id;
+      docker.offline.length = 0;
+      docker.started.length = 0;
+      docker.removed.length = 0;
+      return app.inject({ method: 'POST', url: `/api/orgs/${ORG}/gateways/${theirs}/restart`, headers: await as(OTHER) });
+    };
+    const leftovers = () => fs.readdirSync(dir()).filter((f) => f.startsWith('.clawhuddle-auth-'));
+
+    afterEach(() => {
+      docker.offlineRun = () => 0;
+      docker.offlineOutput = 'cli said no\n';
+      fs.rmSync(path.join(dir(), 'state'), { recursive: true, force: true });
+      vi.restoreAllMocks();
+    });
+
+    it('saves the new key offline before the instance boots, without putting it on a command line', async () => {
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      setStored({ 'google:manual': { type: 'api_key', provider: 'google', key: 'AIza-old' }, 'tokenkiosk:default': { type: 'api_key', provider: 'tokenkiosk', key: 'sk-kiosk' } });
+      const seen: { mode?: number } = {};
+      docker.offlineRun = pasteApiKey(seen);
+
+      expect((await restart()).statusCode).toBe(200);
+
+      expect(docker.offline).toHaveLength(1);
+      const cfg = docker.offline[0];
+      expect(cfg.name).toBe('clawhuddle-authsave-org-1-user-oth');
+      expect(cfg.HostConfig.NetworkMode).toBe('none');
+      expect(cfg.Entrypoint.slice(4, 7)).toEqual(['paste-api-key', 'google', 'google:manual']);
+      expect(cfg.Entrypoint[8]).toBe(''); // one agent: no --agent
+      expect(JSON.stringify(cfg)).not.toContain('AIza-test');
+      expect(seen.mode).toBe(0o600);
+      expect(stored()['google:manual'].key).toBe('AIza-test');
+      expect(stored()['tokenkiosk:default'].key).toBe('sk-kiosk');
+      // The throwaway ran and was removed before the instance itself started.
+      expect(docker.started).toEqual(['clawhuddle-authsave-org-1-user-oth', 'clawhuddle-gw-org-1-user-oth']);
+      expect(docker.removed).toContain('clawhuddle-authsave-org-1-user-oth');
+      expect(leftovers()).toEqual([]);
+      // auth-profiles.json was out of the CLI's way during the save and is back for Doctor.
+      const agentDir = path.join(dir(), 'agents', 'main', 'agent');
+      expect(fs.readFileSync(path.join(agentDir, 'auth-profiles.json'), 'utf-8')).toContain('AIza-test');
+      expect(fs.readdirSync(agentDir)).not.toContain('.clawhuddle-auth-profiles.held');
+    });
+
+    it('waits out the killed gateway\'s hold on the state, then saves', async () => {
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+      setStored({ 'google:manual': { type: 'api_key', provider: 'google', key: 'AIza-old' } });
+      docker.offlineOutput = 'Cannot admit models.authSetApiKey: the owner heartbeat is fresh. last renewed 90 s ago. wait 0 s and retry.\n';
+      const paste = pasteApiKey({});
+      let runs = 0;
+      docker.offlineRun = (cfg) => (++runs === 1 ? 1 : paste(cfg));
+
+      expect((await restart()).statusCode).toBe(200);
+
+      expect(runs).toBe(2);
+      expect(stored()['google:manual'].key).toBe('AIza-test');
+      expect(log.mock.calls.map((c) => c.join(' ')).join('\n')).toContain('still owns the state');
+      expect(docker.started.at(-1)).toBe('clawhuddle-gw-org-1-user-oth');
+      expect(leftovers()).toEqual([]);
+    });
+
+    it('names the default agent when the member has set up more than one', async () => {
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      setStored({ 'google:manual': { type: 'api_key', provider: 'google', key: 'AIza-old' } });
+      const configPath = path.join(dir(), 'openclaw.json');
+      const before = fs.readFileSync(configPath, 'utf-8');
+      const config = JSON.parse(before);
+      config.agents = { ...config.agents, entries: { main: { name: 'Main' }, helper: { name: 'Helper' } } };
+      fs.writeFileSync(configPath, JSON.stringify(config));
+      docker.offlineRun = pasteApiKey({});
+      try {
+        expect((await restart()).statusCode).toBe(200);
+        expect(docker.offline).toHaveLength(1);
+        expect(docker.offline[0].Entrypoint.slice(4, 7)).toEqual(['paste-api-key', 'google', 'google:manual']);
+        expect(docker.offline[0].Entrypoint[8]).toBe('main');
+        expect(stored()['google:manual'].key).toBe('AIza-test');
+      } finally {
+        fs.writeFileSync(configPath, before);
+      }
+    });
+
+    it('runs nothing when the store already holds the key', async () => {
+      setStored({ 'google:manual': { type: 'api_key', provider: 'google', key: 'AIza-test' } });
+      expect((await restart()).statusCode).toBe(200);
+      expect(docker.offline).toHaveLength(0);
+    });
+
+    it("leaves a member's own pointer alone", async () => {
+      const own = { type: 'api_key', provider: 'google', keyRef: { source: 'store', provider: 'default', id: 'GOOGLE_API_KEY' } };
+      setStored({ 'google:manual': own });
+      expect((await restart()).statusCode).toBe(200);
+      expect(docker.offline).toHaveLength(0);
+      expect(stored()['google:manual']).toEqual(own);
+    });
+
+    it('still boots the instance when the save fails, and says so without the key', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      setStored({ 'google:manual': { type: 'api_key', provider: 'google', key: 'AIza-old' } });
+      docker.offlineRun = () => 1;
+
+      expect((await restart()).statusCode).toBe(200);
+
+      expect(docker.started).toEqual(['clawhuddle-authsave-org-1-user-oth', 'clawhuddle-gw-org-1-user-oth']);
+      expect(stored()['google:manual'].key).toBe('AIza-old');
+      const said = warn.mock.calls.map((c) => c.join(' ')).join('\n');
+      expect(said).toContain('could not save google:manual');
+      expect(said).toContain('cli said no');
+      expect(said).not.toContain('AIza-test');
+      expect(leftovers()).toEqual([]);
+    });
   });
 
   it("releases an owner's token only to an owner", async () => {

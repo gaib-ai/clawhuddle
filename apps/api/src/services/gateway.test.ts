@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { reconcileAuthProfileStore } from './gateway.js';
+import { authOwnerAgent, reconcileAuthProfileStore } from './gateway.js';
 
 /**
  * The failure this guards is silent: OpenClaw's importer skips a profile id it
@@ -133,5 +133,130 @@ describe('reconcileAuthProfileStore', () => {
       reconcileAuthProfileStore(REF, { 'openai:oauth': oauth() }, { 'openai:oauth': 'fp-a' }),
     ).not.toThrow();
     expect(fs.existsSync(fingerprintPath())).toBe(false);
+  });
+});
+
+/** OpenClaw 2026.11.x keeps the store in the state database instead. */
+const statePath = () => path.join(dataDir, 'gateways', ORG, USER, 'state', 'openclaw.sqlite');
+
+function createStateStore(profiles: Record<string, unknown>): void {
+  fs.mkdirSync(path.dirname(statePath()), { recursive: true });
+  const db = new Database(statePath());
+  db.exec('CREATE TABLE config_machine_state (state_key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL)');
+  db.prepare('INSERT INTO config_machine_state VALUES (?, ?, ?)').run(
+    'authProfiles.store',
+    JSON.stringify({ version: 1, profiles, authorizationLifetimes: {} }),
+    1,
+  );
+  db.prepare('INSERT INTO config_machine_state VALUES (?, ?, ?)').run('authProfiles.state', '{"order":{}}', 1);
+  db.close();
+}
+
+function readStateStore(): Record<string, any> {
+  const db = new Database(statePath());
+  const row = db.prepare("SELECT value_json FROM config_machine_state WHERE state_key = 'authProfiles.store'").get() as {
+    value_json: string;
+  };
+  db.close();
+  return JSON.parse(row.value_json);
+}
+
+const apiKey = (key: string) => ({ type: 'api_key', provider: 'google', key });
+
+describe('reconcileAuthProfileStore on OpenClaw 2026.11.x', () => {
+  const NEW = { 'google:manual': apiKey('AIza-new') };
+  const reconcile = (fp = 'fp-new') => reconcileAuthProfileStore(REF, NEW, { 'google:manual': fp });
+
+  it('asks for a replaced API key to be saved offline, and edits nothing itself', () => {
+    // 11.x never re-imports auth-profiles.json: a dropped profile would be gone.
+    createStateStore({ 'google:manual': apiKey('AIza-old'), 'tokenkiosk:default': apiKey('sk-kiosk') });
+    const before = readStateStore();
+
+    expect(reconcile()).toEqual(['google:manual']);
+    expect(readStateStore()).toEqual(before);
+  });
+
+  it('asks again on every boot until the store holds the key (no fingerprint shortcut)', () => {
+    createStateStore({ 'google:manual': apiKey('AIza-old') });
+    expect(reconcile()).toEqual(['google:manual']);
+    expect(reconcile()).toEqual(['google:manual']);
+  });
+
+  it('asks for nothing when the store already holds our key', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    createStateStore({ 'google:manual': apiKey('AIza-new') });
+    expect(reconcile()).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('asks for a key the store has never seen, or holds without a credential', () => {
+    createStateStore({ 'tokenkiosk:default': apiKey('sk-kiosk') });
+    expect(reconcile()).toEqual(['google:manual']);
+
+    fs.rmSync(statePath());
+    createStateStore({ 'google:manual': { type: 'api_key', provider: 'google' } });
+    expect(reconcile()).toEqual(['google:manual']);
+  });
+
+  it('leaves a profile the member pointed at their own secret-store entry alone', () => {
+    const ref = { type: 'api_key', provider: 'google', keyRef: { source: 'store', provider: 'default', id: 'GOOGLE_API_KEY' } };
+    createStateStore({ 'google:manual': ref });
+    expect(reconcile()).toEqual([]);
+    expect(readStateStore().profiles['google:manual']).toEqual(ref);
+  });
+
+  it("never drops the member's pointer from the agent store when the org key changes", () => {
+    // Michael's instance, 2026-11-23: the shared profile was bare and the agent
+    // store held the pointer. The pre-11 rule deleted it on a fingerprint
+    // change, nothing re-imported it, and his agent lost Gemini.
+    const ref = { type: 'api_key', provider: 'google', keyRef: { source: 'store', provider: 'default', id: 'GOOGLE_API_KEY' } };
+    createStateStore({ 'google:manual': { type: 'api_key', provider: 'google' } });
+    createStore({ 'google:manual': ref });
+    fs.writeFileSync(fingerprintPath(), JSON.stringify({ 'google:manual': 'fp-old' }));
+
+    expect(reconcile('fp-new')).toEqual([]);
+    expect(readStore()['google:manual']).toEqual(ref);
+  });
+
+  it('never drops an inline key from the agent store either', () => {
+    createStateStore({ 'google:manual': apiKey('AIza-old') });
+    createStore({ 'google:manual': apiKey('AIza-older') });
+    expect(reconcile()).toEqual(['google:manual']);
+    expect(readStore()['google:manual'].key).toBe('AIza-older');
+  });
+
+  it('keeps a replaced OAuth credential, only reporting it', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    createStateStore({ 'openai:oauth': oauth({ refresh: 'refresh-rotated' }) });
+    expect(reconcileAuthProfileStore(REF, { 'openai:oauth': oauth() }, { 'openai:oauth': 'fp-a' })).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+    expect(reconcileAuthProfileStore(REF, { 'openai:oauth': oauth() }, { 'openai:oauth': 'fp-b' })).toEqual([]);
+    expect(readStateStore().profiles['openai:oauth'].refresh).toBe('refresh-rotated');
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('openai:oauth'))).toBe(true);
+  });
+
+  it('falls back to the pre-11 rule when the state database has no auth store', () => {
+    fs.mkdirSync(path.dirname(statePath()), { recursive: true });
+    new Database(statePath()).close();
+    expect(reconcileAuthProfileStore(REF, { 'google:manual': apiKey('k') }, { 'google:manual': 'fp' })).toEqual([]);
+    expect(JSON.parse(fs.readFileSync(fingerprintPath(), 'utf-8'))).toEqual({ 'google:manual': 'fp' });
+  });
+});
+
+describe('authOwnerAgent', () => {
+  it('names nobody with one agent or none', () => {
+    expect(authOwnerAgent({})).toBeNull();
+    expect(authOwnerAgent({ agents: { defaults: {} } })).toBeNull();
+    expect(authOwnerAgent({ agents: { entries: { main: {} } } })).toBeNull();
+  });
+
+  it('names main, or the agent marked default, when there are several', () => {
+    expect(authOwnerAgent({ agents: { entries: { main: {}, 'silicore-assistant': {} } } })).toBe('main');
+    expect(authOwnerAgent({ agents: { entries: { main: {}, ops: { default: true } } } })).toBe('ops');
+    expect(authOwnerAgent({ agents: { list: [{ id: 'a' }, { id: 'b' }] } })).toBe('a');
+  });
+
+  it('never passes an id that is not a plain agent id', () => {
+    expect(authOwnerAgent({ agents: { entries: { 'x; rm -rf /': {}, main: {} } } })).toBeNull();
   });
 });

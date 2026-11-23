@@ -739,24 +739,98 @@ function authFingerprintPath(ref: GatewayRef): string {
 }
 
 /**
- * Lets `openclaw doctor --fix` import a credential the operator has replaced.
+ * Where OpenClaw keeps auth profiles.
  *
- * The importer never overwrites a profile id it already has, so a key changed in
- * the UI is written to auth-profiles.json, silently skipped at import, and the
- * file consumed — the gateway keeps serving the old credential forever. We own
- * the ids we mint, so we delete the ones whose source credential changed and let
- * the importer add them back.
+ * - `shared` — 2026.11.x: the state database (config_machine_state, key
+ *   `authProfiles.store`). Doctor archives auth-profiles.json there as
+ *   "previously migrated" WITHOUT replaying it, so a profile is only ever
+ *   changed with OpenClaw's own CLI while the gateway is stopped
+ *   (saveAuthProfilesOffline). We never write this one ourselves.
+ * - `agent` — the agent database's auth_profile_store table. Before 11.x it was
+ *   the only store and Doctor re-imported whatever we dropped from it. On 11.x
+ *   it is still read, as the per-agent layer over the shared store: Michael's
+ *   instance kept `google:manual` there as a pointer to his own secret-store
+ *   entry.
+ */
+const AUTH_STORES = {
+  shared: {
+    file: ["state", "openclaw.sqlite"],
+    read: "SELECT value_json AS json FROM config_machine_state WHERE state_key = 'authProfiles.store'",
+  },
+  agent: {
+    file: ["agents", "main", "agent", "openclaw-agent.sqlite"],
+    read: "SELECT store_json AS json FROM auth_profile_store WHERE store_key = 'primary'",
+  },
+} as const;
+
+type AuthProfileMap = Record<string, unknown>;
+
+/**
+ * The profiles in one store, or null when this instance has no such store
+ * (never booted, or a version of OpenClaw that keeps none there). Throws on a
+ * store that exists but cannot be read.
+ */
+function readAuthStoreProfiles(ref: GatewayRef, which: keyof typeof AUTH_STORES): AuthProfileMap | null {
+  const loc = AUTH_STORES[which];
+  const storePath = path.join(getGatewayDir(ref), ...loc.file);
+  if (!fs.existsSync(storePath)) return null;
+  const store = new Database(storePath, { readonly: true, fileMustExist: true });
+  try {
+    let row: { json: string } | undefined;
+    try {
+      row = store.prepare(loc.read).get() as { json: string } | undefined;
+    } catch (err: any) {
+      if (/no such table/.test(String(err?.message))) return null;
+      throw err;
+    }
+    if (!row) return null;
+    return (JSON.parse(row.json) as { profiles?: AuthProfileMap }).profiles ?? null;
+  } finally {
+    store.close();
+  }
+}
+
+/** The secret field of a credential OpenClaw never refreshes (API key, setup token), or null. */
+function staticSecret(profile: unknown): string | null {
+  const p = profile as { type?: unknown; key?: unknown; token?: unknown } | null;
+  if (p?.type === "api_key" && typeof p.key === "string") return p.key;
+  if (p?.type === "token" && typeof p.token === "string") return p.token;
+  return null;
+}
+
+/** True when a stored profile points at a credential kept elsewhere (`keyRef`, `tokenRef`: a secret-store entry, an env var). */
+function pointsElsewhere(profile: unknown): boolean {
+  if (!profile || typeof profile !== "object") return false;
+  return Object.entries(profile).some(([k, v]) => /Ref$/.test(k) && v !== null && typeof v === "object");
+}
+
+/**
+ * Makes a credential the operator replaced reach the gateway at its next boot.
+ * Returns the profile ids that still have to be saved with
+ * saveAuthProfilesOffline; before 11.x that list is always empty.
  *
- * Staleness is judged on a fingerprint of OUR copy of the credential, not on the
- * stored value. For OAuth the store is legitimately newer than our file — the
- * gateway writes refreshed tokens back under the same id — so comparing content
- * would drop a live credential on every redeploy and re-import an original whose
- * refresh token the provider has since rotated away.
+ * OpenClaw's importer never overwrites a profile id it already has, so a key
+ * changed in the UI is written to auth-profiles.json, silently skipped at
+ * import, and the file consumed — the gateway keeps serving the old credential
+ * forever.
  *
- * With no fingerprint on record we keep what the gateway has, for the same
- * reason: the first run after this shipped only records, and the next real key
- * change is caught. Ids are unchanged from before, so the order OpenClaw keeps
- * in auth_profile_state still points at profiles that exist.
+ * Before 11.x we delete the ids we mint whose source credential changed and
+ * let the importer add them back. API keys and setup tokens are never rewritten
+ * by the gateway, so those are compared by value. OAuth is judged on a
+ * fingerprint of OUR copy of the credential instead, because the store is
+ * legitimately newer than our file — the gateway writes refreshed tokens back
+ * under the same id — and comparing content would drop a live credential on
+ * every redeploy and re-import an original whose refresh token the provider
+ * has since rotated away. With no OAuth fingerprint on record we keep what the
+ * gateway has.
+ *
+ * On 11.x nothing is re-imported, so nothing is ever dropped (2026-11-23: the
+ * old rule deleted Michael's `google:manual` pointer from the agent store when
+ * the org Gemini key changed, and his agent lost Gemini). Instead every API
+ * key or setup token of ours that the shared store lacks, holds without a
+ * credential, or holds with a different value is returned for an offline save.
+ * A profile that points elsewhere, in either store, is the member's own and is
+ * left alone; a replaced OAuth credential is only reported.
  *
  * Only call this while the container is stopped — the gateway holds the store
  * open, and a running agent would not observe the change anyway.
@@ -765,66 +839,288 @@ export function reconcileAuthProfileStore(
   ref: GatewayRef,
   profiles: Record<string, Record<string, unknown>>,
   fingerprints: Record<string, string>,
-): void {
-  const storePath = path.join(
-    getGatewayDir(ref),
-    "agents", "main", "agent", "openclaw-agent.sqlite",
-  );
-  const recordFingerprints = () => {
-    try {
-      const target = authFingerprintPath(ref);
-      fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.writeFileSync(target, JSON.stringify(fingerprints, null, 2));
-    } catch (err) {
-      console.warn(`[gateway] could not record auth fingerprints for ${refLabel(ref)}:`, err);
-    }
-  };
-
-  // No store yet — the first import has nothing to conflict with.
-  if (!fs.existsSync(storePath)) return recordFingerprints();
-
+): string[] {
   let previous: Record<string, string> = {};
   try {
     previous = JSON.parse(fs.readFileSync(authFingerprintPath(ref), "utf-8"));
   } catch { /* first run, or unreadable — treated as "no record" below */ }
 
-  let store: Database.Database | undefined;
+  const stale: string[] = [];
   try {
-    store = new Database(storePath);
-    const row = store
-      .prepare("SELECT store_json FROM auth_profile_store WHERE store_key = 'primary'")
-      .get() as { store_json: string } | undefined;
-    if (!row) return recordFingerprints();
+    const shared = readAuthStoreProfiles(ref, "shared");
+    const agent = readAuthStoreProfiles(ref, "agent");
 
-    const parsed = JSON.parse(row.store_json) as { profiles?: Record<string, unknown> };
-    if (!parsed.profiles) return recordFingerprints();
-
-    const dropped: string[] = [];
-    for (const profileId of Object.keys(parsed.profiles)) {
-      if (!MANAGED_PROFILE_ID.test(profileId)) continue;
-      if (!profiles[profileId]) continue;           // not ours to manage right now
-      const before = previous[profileId];
-      if (before === undefined) continue;            // nothing to compare against — keep
-      if (before === fingerprints[profileId]) continue; // same credential — keep the refreshed one
-      delete parsed.profiles[profileId];
-      dropped.push(profileId);
+    if (shared) {
+      const replacedOAuth: string[] = [];
+      for (const [profileId, ours] of Object.entries(profiles)) {
+        if (!MANAGED_PROFILE_ID.test(profileId)) continue;
+        const stored = shared[profileId];
+        const oursStatic = staticSecret(ours);
+        if (oursStatic === null) {
+          const before = previous[profileId];
+          if (stored && before !== undefined && before !== fingerprints[profileId]) replacedOAuth.push(profileId);
+          continue;
+        }
+        if (staticSecret(stored) === oursStatic) continue;                       // already the current key
+        if (pointsElsewhere(stored) || pointsElsewhere(agent?.[profileId])) continue; // the member's own
+        stale.push(profileId);
+      }
+      if (replacedOAuth.length > 0) {
+        console.warn(
+          `[gateway] ${refLabel(ref)}: the OAuth credential for ${replacedOAuth.join(", ")} was replaced in ClawHuddle, ` +
+            "but OpenClaw 11.x keeps the one it has — sign in again on the instance (`openclaw models auth login`)",
+        );
+      }
+    } else if (agent) {
+      dropReplacedForReimport(ref, agent, profiles, fingerprints, previous);
     }
-
-    recordFingerprints();
-    if (dropped.length === 0) return;
-
-    store
-      .prepare("UPDATE auth_profile_store SET store_json = ? WHERE store_key = 'primary'")
-      .run(JSON.stringify(parsed));
-    console.log(
-      `[gateway] auth store reconciled for ${refLabel(ref)}: dropped ${dropped.join(", ")} for re-import`,
-    );
   } catch (err) {
     // A malformed or unfamiliar store must not block a redeploy: the gateway
-    // still boots, it just keeps serving the previous credential.
+    // still boots, it just keeps serving the previous credential. Claiming we
+    // handed these over would make the next reconcile read a real OAuth change
+    // as "unchanged" and skip it, so no fingerprints are recorded.
     console.warn(`[gateway] could not reconcile auth store for ${refLabel(ref)}:`, err);
+    return [];
+  }
+
+  try {
+    const target = authFingerprintPath(ref);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, JSON.stringify(fingerprints, null, 2));
+  } catch (err) {
+    console.warn(`[gateway] could not record auth fingerprints for ${refLabel(ref)}:`, err);
+  }
+  return stale;
+}
+
+/** The pre-11.x half of reconcileAuthProfileStore: drop replaced ids so Doctor imports them again. */
+function dropReplacedForReimport(
+  ref: GatewayRef,
+  stored: AuthProfileMap,
+  profiles: Record<string, Record<string, unknown>>,
+  fingerprints: Record<string, string>,
+  previous: Record<string, string>,
+): void {
+  const dropped: string[] = [];
+  for (const profileId of Object.keys(stored)) {
+    if (!MANAGED_PROFILE_ID.test(profileId)) continue;
+    const ours = profiles[profileId];
+    if (!ours) continue;                               // not ours to manage right now
+    const oursStatic = staticSecret(ours);
+    if (oursStatic !== null) {
+      const storedStatic = staticSecret(stored[profileId]);
+      if (storedStatic === null) continue;             // points elsewhere — the member's own
+      if (storedStatic === oursStatic) continue;       // already the current key
+    } else {
+      const before = previous[profileId];
+      if (before === undefined) continue;              // nothing to compare against — keep
+      if (before === fingerprints[profileId]) continue; // same credential — keep the refreshed one
+    }
+    dropped.push(profileId);
+  }
+  if (dropped.length === 0) return;
+
+  const kept = Object.fromEntries(Object.entries(stored).filter(([id]) => !dropped.includes(id)));
+  const store = new Database(path.join(getGatewayDir(ref), ...AUTH_STORES.agent.file), { fileMustExist: true });
+  try {
+    const row = store.prepare(AUTH_STORES.agent.read).get() as { json: string };
+    store
+      .prepare("UPDATE auth_profile_store SET store_json = ? WHERE store_key = 'primary'")
+      .run(JSON.stringify({ ...JSON.parse(row.json), profiles: kept }));
   } finally {
-    store?.close();
+    store.close();
+  }
+  console.log(`[gateway] auth store reconciled for ${refLabel(ref)}: dropped ${dropped.join(", ")} for re-import`);
+}
+
+/** How long one offline `openclaw models auth …` run may take (a normal one is a few seconds). */
+const OFFLINE_AUTH_TIMEOUT_MS = 120_000;
+
+/**
+ * Saves the given API keys / setup tokens into a STOPPED instance's auth store
+ * with OpenClaw's own CLI (`openclaw models auth paste-api-key|paste-token`),
+ * the only way a changed key reaches an 11.x gateway. The CLI demands exclusive
+ * ownership of the state, hence stopped; it runs in a throwaway container of
+ * `image` on the instance's state dir, with no network. The key travels in a
+ * transient 0600 file in that dir, never on a command line or in a log.
+ *
+ * `image` must be the image the instance itself runs: a newer OpenClaw would
+ * migrate the state one way.
+ *
+ * auth-profiles.json is moved aside for the run: while that file holds a
+ * credential the store has not imported yet (i.e. the very key being changed),
+ * the CLI refuses with AUTH_PROFILE_MIGRATION_REQUIRED ("run openclaw doctor
+ * --fix"). It is put back afterwards, for Doctor to archive at boot as before.
+ *
+ * Never throws: a failed save leaves the previous credential in place and is
+ * logged, and the gateway still boots.
+ */
+export async function saveAuthProfilesOffline(
+  g: GatewayRow,
+  profiles: Record<string, Record<string, unknown>>,
+  profileIds: string[],
+  image: string,
+): Promise<void> {
+  if (profileIds.length === 0) return;
+  const legacyFile = path.join(getGatewayDir(g), "agents", "main", "agent", "auth-profiles.json");
+  const heldFile = path.join(path.dirname(legacyFile), ".clawhuddle-auth-profiles.held");
+  let held = false;
+  try {
+    if (fs.existsSync(legacyFile)) {
+      fs.renameSync(legacyFile, heldFile);
+      held = true;
+    }
+  } catch (err) {
+    console.warn(`[gateway] could not move auth-profiles.json aside for ${refLabel(g)}:`, err);
+  }
+  try {
+    await saveEachAuthProfile(g, profiles, profileIds, image);
+  } finally {
+    if (held) {
+      try {
+        fs.renameSync(heldFile, legacyFile);
+      } catch (err) {
+        console.warn(`[gateway] could not put auth-profiles.json back for ${refLabel(g)}:`, err);
+      }
+    }
+  }
+}
+
+/** One offline CLI run in a throwaway container. */
+async function runAuthSave(
+  g: GatewayRow,
+  image: string,
+  args: { command: string; provider: string; profileId: string; valueFile: string; agent: string | null },
+): Promise<{ exitCode: number; output: string }> {
+  const name = containerNameFor(g).replace(CONTAINER_PREFIX, "clawhuddle-authsave-");
+  let container: Docker.Container | undefined;
+  try {
+    await docker.getContainer(name).remove({ force: true }).catch(() => {}); // left by a crashed run
+    container = await docker.createContainer({
+      Image: image,
+      name,
+      // Arguments are passed as argv, never spliced into the script.
+      Entrypoint: [
+        "sh", "-c",
+        'if [ -n "$5" ]; then exec openclaw models auth "$1" --agent "$5" --provider "$2" --profile-id "$3" < "$4"; ' +
+          'else exec openclaw models auth "$1" --provider "$2" --profile-id "$3" < "$4"; fi',
+        "sh", args.command, args.provider, args.profileId, `/root/.openclaw/${args.valueFile}`, args.agent ?? "",
+      ],
+      Cmd: [],
+      // Without this the CLI hides why it failed ("The CLI command failed.").
+      Env: ["OPENCLAW_DEBUG=1"],
+      HostConfig: { Binds: [`${getHostGatewayDir(g)}:/root/.openclaw`], NetworkMode: "none" },
+    });
+    await container.start();
+    const running = container;
+    const timer = setTimeout(() => void running.kill().catch(() => {}), OFFLINE_AUTH_TIMEOUT_MS);
+    let exitCode: number;
+    try {
+      exitCode = ((await container.wait()) as { StatusCode: number }).StatusCode;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (exitCode === 0) return { exitCode, output: "" };
+    const raw = (await container.logs({ stdout: true, stderr: true, tail: 60 })) as unknown as Buffer;
+    const { stdout, stderr } = demuxDockerStream(Buffer.isBuffer(raw) ? raw : Buffer.from(String(raw)));
+    const lines = `${stdout}\n${stderr}`.split("\n").filter((l) => l.trim() && !/DeprecationWarning|--trace-deprecation/.test(l));
+    return { exitCode, output: lines.join("\n") };
+  } finally {
+    await container?.remove({ force: true }).catch(() => {});
+  }
+}
+
+/**
+ * With more than one agent configured the CLI refuses to guess whose
+ * credentials it is saving ("Multiple agents are configured, but the model
+ * command has no explicit owner. Pass --agent <id>", Kony's instance,
+ * 2026-11-23). The API key lands in the shared store either way, so we name the
+ * default agent; with one agent or none we pass nothing, as before.
+ */
+export function authOwnerAgent(config: unknown): string | null {
+  const agents = (config as { agents?: { entries?: unknown; list?: unknown } } | null)?.agents;
+  const found: { id: string; isDefault: boolean }[] = [];
+  if (agents?.entries && typeof agents.entries === "object" && !Array.isArray(agents.entries)) {
+    for (const [id, entry] of Object.entries(agents.entries as Record<string, { default?: unknown } | null>))
+      found.push({ id, isDefault: entry?.default === true });
+  }
+  if (Array.isArray(agents?.list)) {
+    for (const entry of agents.list as { id?: unknown; default?: unknown }[])
+      if (typeof entry?.id === "string") found.push({ id: entry.id, isDefault: entry.default === true });
+  }
+  const ids = [...new Set(found.map((a) => a.id))].filter((id) => /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id));
+  if (ids.length < 2) return null;
+  return found.find((a) => a.isDefault && ids.includes(a.id))?.id ?? (ids.includes("main") ? "main" : ids[0]);
+}
+
+function readAuthOwnerAgent(g: GatewayRow): string | null {
+  try {
+    return authOwnerAgent(JSON.parse(fs.readFileSync(path.join(getGatewayDir(g), "openclaw.json"), "utf-8")));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A gateway that was killed rather than shut down (ours always are: `docker
+ * stop` ends in SIGKILL) still owns the state until its heartbeat is 90 s old,
+ * and the CLI in another container refuses until then ("the owner heartbeat is
+ * fresh … wait 59 s and retry"). We wait that long, once per boot.
+ */
+const OWNER_LEASE_MAX_WAIT_MS = 110_000;
+function ownerLeaseWaitMs(output: string): number | null {
+  if (!/owner heartbeat is fresh/i.test(output)) return null;
+  const seconds = Number(/wait (\d+) s and retry/i.exec(output)?.[1] ?? 15);
+  return (Math.min(seconds, 90) + 1) * 1000;
+}
+
+async function saveEachAuthProfile(
+  g: GatewayRow,
+  profiles: Record<string, Record<string, unknown>>,
+  profileIds: string[],
+  image: string,
+): Promise<void> {
+  const giveUpAt = Date.now() + OWNER_LEASE_MAX_WAIT_MS;
+  const agent = readAuthOwnerAgent(g);
+  for (const profileId of profileIds) {
+    const profile = profiles[profileId];
+    const secret = staticSecret(profile);
+    const provider = typeof profile?.provider === "string" ? profile.provider : "";
+    if (secret === null || !MANAGED_PROFILE_ID.test(profileId) || !/^[a-z0-9][a-z0-9-]*$/.test(provider)) continue;
+    const command = profile.type === "token" ? "paste-token" : "paste-api-key";
+
+    const valueFile = `.clawhuddle-auth-${crypto.randomBytes(6).toString("hex")}`;
+    const hostPath = path.join(getGatewayDir(g), valueFile);
+    try {
+      fs.writeFileSync(hostPath, secret, { mode: 0o600 });
+      for (;;) {
+        const run = await runAuthSave(g, image, { command, provider, profileId, valueFile, agent });
+        const saved = staticSecret(readAuthStoreProfiles(g, "shared")?.[profileId]) === secret;
+        if (run.exitCode === 0 && saved) {
+          console.log(`[gateway] ${profileId} saved into the auth store of ${refLabel(g)} (key changed in ClawHuddle)`);
+          break;
+        }
+        const waitMs = ownerLeaseWaitMs(run.output);
+        if (waitMs !== null && Date.now() + waitMs <= giveUpAt) {
+          console.log(
+            `[gateway] ${refLabel(g)}: the stopped gateway still owns the state; saving ${profileId} in ${Math.round(waitMs / 1000)} s`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, waitMs));
+          continue;
+        }
+        // The reason comes first, then a stack.
+        const output = run.output.split(secret).join("<redacted>").slice(0, 2000);
+        console.warn(
+          `[gateway] could not save ${profileId} into the auth store of ${refLabel(g)} ` +
+            `(exit ${run.exitCode}, ${saved ? "saved" : "store unchanged"}); it keeps its previous credential. ${output}`,
+        );
+        break;
+      }
+    } catch (err) {
+      console.warn(`[gateway] could not save ${profileId} into the auth store of ${refLabel(g)}:`, err);
+    } finally {
+      fs.rmSync(hostPath, { force: true });
+    }
   }
 }
 
@@ -1037,7 +1333,7 @@ export async function deployGateway(orgId: string, gatewayId: string) {
   // may have changed since the last boot: reconcile, or the importer would skip
   // the id it already has and the gateway would come back on the old credential.
   const auth = writeAuthProfiles(g);
-  reconcileAuthProfileStore(g, auth.profiles, auth.fingerprints);
+  const staleProfiles = reconcileAuthProfileStore(g, auth.profiles, auth.fingerprints);
   if (auth.providerIds.length === 0)
     throw new Error("No API keys configured — add at least one provider key");
 
@@ -1046,6 +1342,9 @@ export async function deployGateway(orgId: string, gatewayId: string) {
 
   // Install skill directories (shared per user, copied into every instance)
   await installSkillsForUser(path.join(g.org_id, gatewayDirName(g.user_id, g.slot)), getMemberSkills(orgId, g.user_id));
+
+  // After the config is written: the CLI records the profile in openclaw.json too.
+  await saveAuthProfilesOffline(g, auth.profiles, staleProfiles, GATEWAY_IMAGE);
 
   const container = await docker.createContainer(createContainerConfig(g));
   await container.start();
@@ -1083,17 +1382,30 @@ export async function stopGateway(orgId: string, gatewayId: string) {
   return publicState(getGatewayRow(orgId, gatewayId));
 }
 
+/**
+ * For a stopped instance about to boot in its existing container: write
+ * auth-profiles.json and bring the auth store in line with the member's keys,
+ * using the image that container was created from.
+ */
+async function syncAuthBeforeBoot(g: GatewayRow, container: Docker.Container): Promise<void> {
+  const { profiles, fingerprints } = writeAuthProfiles(g);
+  const stale = reconcileAuthProfileStore(g, profiles, fingerprints);
+  if (stale.length === 0) return;
+  const image = await container.inspect().then((info) => info.Image, () => undefined);
+  await saveAuthProfilesOffline(g, profiles, stale, image || GATEWAY_IMAGE);
+}
+
 export async function startGateway(orgId: string, gatewayId: string) {
   const g = getGatewayRow(orgId, gatewayId);
 
   // A key may have changed while this gateway was stopped. Reconcile before it
   // boots: the importer would otherwise skip the id it already has and the
   // gateway would come back up on the old credential without saying so.
-  const { profiles, fingerprints } = writeAuthProfiles(g);
-  reconcileAuthProfileStore(g, profiles, fingerprints);
+  const container = docker.getContainer(containerNameFor(g));
+  await syncAuthBeforeBoot(g, container);
   ensureGogEnv(g);
 
-  await docker.getContainer(containerNameFor(g)).start();
+  await container.start();
   setGatewayState(g.id, { status: "deploying" });
   scheduleSecretSync(g);
   return publicState(getGatewayRow(orgId, gatewayId));
@@ -1106,11 +1418,15 @@ export async function startGateway(orgId: string, gatewayId: string) {
  */
 export async function restartGateway(orgId: string, gatewayId: string) {
   const g = getGatewayRow(orgId, gatewayId);
-  const { profiles, fingerprints } = writeAuthProfiles(g);
-  reconcileAuthProfileStore(g, profiles, fingerprints);
+  const container = docker.getContainer(containerNameFor(g));
+  // Stop first: the auth store must not be edited under a running gateway.
+  await container.stop().catch((err: any) => {
+    if (err?.statusCode !== 304) throw err; // 304 = already stopped
+  });
+  await syncAuthBeforeBoot(g, container);
   ensureGogEnv(g);
 
-  await docker.getContainer(containerNameFor(g)).restart();
+  await container.start();
   setGatewayState(g.id, { status: "deploying" });
   scheduleSecretSync(g);
   return publicState(getGatewayRow(orgId, gatewayId));
