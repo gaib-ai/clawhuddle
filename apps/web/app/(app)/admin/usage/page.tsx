@@ -48,6 +48,7 @@ export default function UsagePage() {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState('');
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [costGroup, setCostGroup] = useState<'model' | 'provider'>('model');
 
   const loadSnapshot = useCallback(async () => {
     if (!orgFetch) return;
@@ -116,6 +117,26 @@ export default function UsagePage() {
     return s;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [snapshot, scope]);
+
+  const byModel = useMemo(() => {
+    const m = new Map<string, { model: string; calls: number; tokens: number; cost: number; unpriced: number; gateways: Set<string> }>();
+    for (const u of loaded) {
+      for (const x of u.byModel) {
+        const key = costGroup === 'provider' ? x.provider || 'unknown' : `${x.provider}/${x.model}`;
+        const cur = m.get(key) ?? { model: key, calls: 0, tokens: 0, cost: 0, unpriced: 0, gateways: new Set<string>() };
+        cur.calls += x.calls;
+        cur.tokens += x.totals.totalTokens;
+        cur.cost += x.totals.totalCost;
+        cur.unpriced += x.totals.missingCostEntries;
+        cur.gateways.add(u.gateway_id);
+        m.set(key, cur);
+      }
+    }
+    return [...m.values()]
+      .map(({ gateways, ...rest }) => ({ ...rest, instances: gateways.size }))
+      .sort((a, b) => b.cost - a.cost || b.tokens - a.tokens);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapshot, scope, costGroup]);
 
   const daily = useMemo(() => {
     const byDate = new Map<string, { tokens: number; cost: number }>();
@@ -230,6 +251,75 @@ export default function UsagePage() {
             >
               <h2 className="text-sm font-medium mb-3" style={{ color: 'var(--text-primary)' }}>Tokens per day, all instances</h2>
               <DailyBars data={daily} />
+            </section>
+          )}
+
+          {byModel.length > 0 && (
+            <section
+              className="rounded-xl p-4 mb-6 overflow-x-auto"
+              style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)' }}
+            >
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <h2 className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
+                  Cost by {costGroup}, all instances
+                </h2>
+                <div className="flex rounded-lg p-0.5" style={{ background: 'var(--bg-secondary)' }} role="radiogroup" aria-label="Group cost by">
+                  {(['model', 'provider'] as const).map((g) => (
+                    <button
+                      key={g}
+                      role="radio"
+                      aria-checked={costGroup === g}
+                      onClick={() => setCostGroup(g)}
+                      className="px-2.5 py-1 rounded-md text-xs font-medium transition-colors"
+                      style={
+                        costGroup === g
+                          ? { background: 'var(--bg-tertiary)', color: 'var(--text-primary)' }
+                          : { color: 'var(--text-tertiary)' }
+                      }
+                    >
+                      {g === 'model' ? 'By model' : 'By provider'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <table className="w-full text-xs">
+                <thead>
+                  <tr style={{ color: 'var(--text-tertiary)' }}>
+                    <th className="text-left font-medium pr-3 py-1.5">{costGroup === 'model' ? 'Model' : 'Provider'}</th>
+                    <th className="text-right font-medium px-3 py-1.5 hidden sm:table-cell">Instances</th>
+                    <th className="text-right font-medium px-3 py-1.5 hidden sm:table-cell">Calls</th>
+                    <th className="text-right font-medium px-3 py-1.5">Tokens</th>
+                    <th className="text-right font-medium px-3 py-1.5">Est. cost</th>
+                    <th className="text-right font-medium pl-3 py-1.5">Share</th>
+                  </tr>
+                </thead>
+                <tbody className="tabular-nums" style={{ color: 'var(--text-secondary)' }}>
+                  {byModel.map((m) => (
+                    <tr key={m.model} style={{ borderTop: '1px solid var(--border-subtle)' }}>
+                      <td className="pr-3 py-1.5 font-mono break-all" style={{ color: 'var(--text-primary)' }}>{m.model}</td>
+                      <td className="text-right px-3 py-1.5 hidden sm:table-cell">{m.instances.toLocaleString('en-US')}</td>
+                      <td className="text-right px-3 py-1.5 hidden sm:table-cell">{m.calls.toLocaleString('en-US')}</td>
+                      <td className="text-right px-3 py-1.5">{fmtTokens(m.tokens)}</td>
+                      <td className="text-right px-3 py-1.5" style={{ color: 'var(--text-primary)' }}>
+                        {m.unpriced > 0 && m.cost === 0 ? 'no price' : fmtCost(m.cost)}
+                      </td>
+                      <td className="text-right pl-3 py-1.5">
+                        {summary.cost > 0 ? `${((m.cost / summary.cost) * 100).toFixed(m.cost / summary.cost < 0.1 ? 1 : 0)}%` : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                  <tr style={{ borderTop: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}>
+                    <td className="pr-3 py-1.5 font-medium">Total</td>
+                    <td className="hidden sm:table-cell" />
+                    <td className="text-right px-3 py-1.5 hidden sm:table-cell">
+                      {byModel.reduce((n, m) => n + m.calls, 0).toLocaleString('en-US')}
+                    </td>
+                    <td className="text-right px-3 py-1.5">{fmtTokens(summary.tokens)}</td>
+                    <td className="text-right px-3 py-1.5 font-medium">{fmtCost(summary.cost)}</td>
+                    <td className="text-right pl-3 py-1.5">{summary.cost > 0 ? '100%' : '—'}</td>
+                  </tr>
+                </tbody>
+              </table>
             </section>
           )}
 
