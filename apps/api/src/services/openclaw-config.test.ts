@@ -24,13 +24,27 @@ describe('generateOpenClawConfig (OpenClaw 2026.10.x schema)', () => {
 });
 
 describe('default model', () => {
-  it('defaults the primary to Gemini 3.8 Flash when no provider is pinned', () => {
-    expect(generateOpenClawConfig(base).agents!.defaults.model.primary).toBe('google/gemini-3.8-flash');
+  it('defaults the primary to Gemini 4 Hydrogen when no provider is pinned', () => {
+    expect(generateOpenClawConfig(base).agents!.defaults.model.primary).toBe('google/gemini-4-hydrogen');
   });
 
-  it('uses Gemini 3.8 Flash for a pinned google provider without a model override', () => {
+  it('uses Gemini 4 Hydrogen for a pinned google provider without a model override', () => {
     const cfg = generateOpenClawConfig({ ...base, primaryProviderId: 'google' });
+    expect(cfg.agents!.defaults.model.primary).toBe('google/gemini-4-hydrogen');
+  });
+
+  it('keeps an instance pinned to Gemini 3.8 Flash on it after Flash left the pick-list', () => {
+    const cfg = generateOpenClawConfig({ ...base, primaryProviderId: 'google', primaryModel: 'google/gemini-3.8-flash' });
+    const defaults = cfg.agents!.defaults;
+    expect(defaults.model.primary).toBe('google/gemini-3.8-flash');
+    expect(defaults.modelPolicy!.allow).toContain('google/gemini-3.8-flash');
+    expect(cfg.models!.providers.google!.models!.map((m) => m.id)).toContain('gemini-3.8-flash');
+  });
+
+  it('a key still overridden to Gemini 3.8 Flash keeps that model for a provider pin', () => {
+    const cfg = generateOpenClawConfig({ ...base, primaryProviderId: 'google', modelOverrides: { google: 'google/gemini-3.8-flash' } });
     expect(cfg.agents!.defaults.model.primary).toBe('google/gemini-3.8-flash');
+    expect(cfg.agents!.defaults.modelPolicy!.allow).toContain('google/gemini-4-hydrogen');
   });
 
   it('a pin to a retired model keeps working (no longer offered, still declared)', () => {
@@ -56,10 +70,12 @@ describe('default model', () => {
   it('loads every catalog model of the active providers so members can switch inside OpenClaw', () => {
     const defaults = generateOpenClawConfig({ ...base, primaryProviderId: 'google' }).agents!.defaults;
     const loaded = Object.keys(defaults.models);
-    for (const id of ['google/gemini-3.8-flash', 'google/gemini-4-argon', 'tokenkiosk/azure/gpt-5.5', 'tokenkiosk/claude-sonnet-5', 'tokenkiosk/minimax-m3.1-flash']) {
+    for (const id of ['google/gemini-4-hydrogen', 'google/gemini-4-neon', 'google/gemini-4-argon', 'tokenkiosk/azure/gpt-5.5', 'tokenkiosk/claude-sonnet-5', 'tokenkiosk/minimax-m3.1-flash']) {
       expect(loaded).toContain(id);
     }
-    expect(loaded[0]).toBe('google/gemini-3.8-flash');
+    expect(loaded[0]).toBe('google/gemini-4-hydrogen');
+    // No longer offered, so not loaded unless something is pinned to it.
+    expect(loaded).not.toContain('google/gemini-3.8-flash');
     expect(defaults.modelPolicy!.allow).toEqual(loaded);
     // Fallbacks stay one per provider.
     expect(defaults.model.fallbacks).toEqual(['tokenkiosk/azure/gpt-5.5']);
@@ -67,17 +83,17 @@ describe('default model', () => {
 
   it('ignores a pinned model whose provider the member has no key for', () => {
     const cfg = generateOpenClawConfig({ ...base, primaryProviderId: 'google', primaryModel: 'anthropic/claude-fable-5' });
-    expect(cfg.agents!.defaults.model.primary).toBe('google/gemini-3.8-flash');
+    expect(cfg.agents!.defaults.model.primary).toBe('google/gemini-4-hydrogen');
     expect(Object.keys(cfg.agents!.defaults.models)).not.toContain('anthropic/claude-fable-5');
   });
 });
 
 describe('google catalog extension', () => {
-  it('declares the Gemini models OpenClaw 2026.10.x does not know', () => {
+  it('declares the Gemini models we offer and the retired Flash', () => {
     const google = generateOpenClawConfig(base).models!.providers.google!;
     expect(google).not.toHaveProperty('apiKey');
     expect(google.models!.map((m) => m.id)).toEqual(
-      expect.arrayContaining(['gemini-4-argon', 'gemini-3.8-flash']),
+      expect.arrayContaining(['gemini-4-hydrogen', 'gemini-4-neon', 'gemini-4-argon', 'gemini-3.8-flash']),
     );
   });
 });
@@ -178,6 +194,17 @@ describe('reply latency defaults (2026-10-16)', () => {
     existing.agents.defaults.heartbeat = { isolatedSession: false };
     const optedOut = mergeOpenClawConfig(existing as Parameters<typeof mergeOpenClawConfig>[0], base) as unknown as Record<string, any>;
     expect(optedOut.agents.defaults.heartbeat).toEqual({ isolatedSession: false });
+  });
+
+  it('keeps agents.defaults.systemAgent, which OpenClaw writes on a multi-agent instance', () => {
+    const existing = generateOpenClawConfig(base) as unknown as Record<string, any>;
+    existing.agents.defaults.systemAgent = { agentId: 'main' };
+    existing.agents.defaults.thinkingDefault = 'high';
+    const merged = mergeOpenClawConfig(existing as Parameters<typeof mergeOpenClawConfig>[0], base) as unknown as Record<string, any>;
+    expect(merged.agents.defaults.systemAgent).toEqual({ agentId: 'main' });
+    // The rest of the block is still rewritten.
+    expect(merged.agents.defaults.thinkingDefault).toBe('low');
+    expect(generateOpenClawConfig(base).agents!.defaults).not.toHaveProperty('systemAgent');
   });
 });
 

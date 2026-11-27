@@ -467,19 +467,23 @@ export function generateOpenClawConfig(options: {
       ],
     };
   }
-  // Google: gemini-4-argon and gemini-3.8-flash are served by the Gemini API
-  // but are not in OpenClaw's bundled or remote model catalog (as of
-  // 2026.10.3; its newest Flash is gemini-3-flash-preview), so referencing
-  // them fails with "Unknown model" unless they are declared under the
-  // built-in provider. Declaring only `models` extends the catalog; auth still
-  // comes from the google auth profile. Emitted unconditionally because
-  // DEFAULT_PRIMARY below is a google model even for members without a google
-  // key — a missing declaration would turn "no credentials" into the
-  // misleading "Unknown model".
+  // Google: the models we offer (and the ones we used to) are declared under
+  // the built-in provider. OpenClaw's catalog did not know gemini-4-argon or
+  // gemini-3.8-flash on 2026.10.x (referencing them failed with "Unknown
+  // model"); 2026.11.2 lists all of these, but an instance's catalog can be
+  // older than the Gemini API, so the declaration stays. Declaring only
+  // `models` extends the catalog; auth still comes from the google auth
+  // profile. Emitted unconditionally because DEFAULT_PRIMARY below is a google
+  // model even for members without a google key — a missing declaration would
+  // turn "no credentials" into the misleading "Unknown model".
+  // Limits from the Gemini API ListModels response (2026-11-27): 1M in for
+  // all; 64k out for Hydrogen, Neon and 3.8 Flash, 32k out for Argon.
   customProviders.google = {
     models: [
+      { id: 'gemini-4-hydrogen', name: 'Gemini 4 Hydrogen', reasoning: true, input: ['text', 'image'], contextWindow: 1048576, maxTokens: 65536 },
+      { id: 'gemini-4-neon', name: 'Gemini 4 Neon', reasoning: true, input: ['text', 'image'], contextWindow: 1048576, maxTokens: 65536 },
       { id: 'gemini-4-argon', name: 'Gemini 4 Argon', reasoning: true, input: ['text', 'image'], contextWindow: 1048576, maxTokens: 32768 },
-      // Limits from the Gemini API ListModels response (2026-10-23): 1M in, 64k out.
+      // No longer offered (2026-11-27); kept for instances and keys pinned to it.
       { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', reasoning: true, input: ['text', 'image'], contextWindow: 1048576, maxTokens: 65536 },
     ],
   };
@@ -491,11 +495,11 @@ export function generateOpenClawConfig(options: {
   //  - If the org pinned a primary provider (Admin → API Keys) AND the member
   //    has a key for it, that provider's model (honoring the per-provider
   //    model override) becomes primary; other active providers are fallbacks.
-  //  - Otherwise the primary defaults to google/gemini-3.8-flash (Gemini 4
-  //    Argon until 2026-10-28) —
-  //    NOT the first active provider — so gateways behave consistently no
-  //    matter which keys happen to exist.
-  const DEFAULT_PRIMARY = 'google/gemini-3.8-flash';
+  //  - Otherwise the primary defaults to google/gemini-4-hydrogen (Gemini 3.8
+  //    Flash until 2026-11-27, Gemini 4 Argon until 2026-10-28) — NOT the
+  //    first active provider — so gateways behave consistently no matter
+  //    which keys happen to exist.
+  const DEFAULT_PRIMARY = 'google/gemini-4-hydrogen';
   const overrides = options.modelOverrides ?? {};
   const resolveModel = (p: (typeof PROVIDERS)[number]) => overrides[p.id] || p.defaultModel;
 
@@ -672,6 +676,12 @@ export function mergeOpenClawConfig(
     if (prevHeartbeat && typeof prevHeartbeat === 'object' && !Array.isArray(prevHeartbeat)) {
       defaults.heartbeat = { ...(generated.agents.defaults.heartbeat ?? {}), ...prevHeartbeat };
     }
+    // agents.defaults.systemAgent is OpenClaw's own: on an instance with more
+    // than one agent it names the agent that owns operations without an
+    // explicit one (Doctor writes it at boot). Dropping it makes those refuse
+    // with "Multiple agents are configured … no explicit owner" until the next
+    // restart (2026-11-27, Kony's instance after an org-level model change).
+    if (prevDefaults?.systemAgent !== undefined) defaults.systemAgent = prevDefaults.systemAgent;
     (merged.agents as Record<string, unknown>).defaults = defaults;
   } else if (merged.agents && typeof merged.agents === 'object') {
     // No active providers — clear managed defaults but preserve other agent settings
