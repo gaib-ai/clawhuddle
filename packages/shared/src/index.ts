@@ -325,6 +325,13 @@ export interface ProviderConfig {
    * instead of silently falling back to the provider default.
    */
   retiredModels?: string[];
+  /**
+   * Retired models that were once this provider's default. Automations and
+   * sessions inside OpenClaw created under that default carry its ref, so the
+   * generator keeps these on the model allowlist; a ref that is missing there
+   * fails every run of the automation that names it.
+   */
+  formerDefaults?: string[];
   /** Whether this provider supports setup tokens (e.g. `claude setup-token`) */
   supportsSetupToken?: boolean;
   /** Instructions shown in UI for obtaining a setup token */
@@ -357,18 +364,17 @@ export interface ProviderConfig {
 export const PROVIDERS: ProviderConfig[] = [
   {
     id: 'google', label: 'Google Gemini', envVar: 'GEMINI_API_KEY', placeholder: 'AIza...',
-    defaultModel: 'google/gemini-4-hydrogen',
-    // Gemini 4 only since 2026-11-27, Hydrogen first (the platform default).
+    defaultModel: 'google/gemini-3.8-flash',
+    // Gemini 3.8 Flash first (the platform default; Gemini 4 Hydrogen held
+    // that place for a few hours on 2026-11-27), then the Gemini 4 models.
     // All are declared under models.providers.google by the config generator;
     // keep the two lists in step.
     models: [
+      { id: 'google/gemini-3.8-flash', label: 'Gemini 3.8 Flash' },
       { id: 'google/gemini-4-hydrogen', label: 'Gemini 4 Hydrogen' },
       { id: 'google/gemini-4-neon', label: 'Gemini 4 Neon' },
       { id: 'google/gemini-4-argon', label: 'Gemini 4 Argon' },
     ],
-    // The default until 2026-11-27; still declared by the generator so an
-    // instance or key pinned to it keeps working.
-    retiredModels: ['google/gemini-3.8-flash'],
   },
   {
     id: 'token-kiosk', label: 'Token Kiosk', envVar: '', placeholder: 'sk-...',

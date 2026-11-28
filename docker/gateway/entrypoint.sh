@@ -12,6 +12,11 @@ if [ -d "$HOME/.openclaw/ssh" ] && [ ! -e "$HOME/.ssh" ] && [ ! -L "$HOME/.ssh" 
   ln -s "$HOME/.openclaw/ssh" "$HOME/.ssh"
 fi
 
+# A gateway that was killed in this instance's previous container still holds
+# the state lock, and OpenClaw 2026.11.5+ never takes such a lock over by itself
+# (see clawhuddle-recover-lock). Nothing else has started on this state dir yet.
+clawhuddle-recover-lock || true
+
 # Auto-fix legacy config keys (e.g. tools.web.search → plugins.entries.*.config.webSearch)
 openclaw doctor --fix 2>/dev/null || true
 
@@ -92,6 +97,16 @@ fi
 # Start gateway in background so we can run the auto-approve loop.
 openclaw gateway &
 GATEWAY_PID=$!
+
+# `docker stop` signals PID 1, this script, which would ignore it and be killed
+# with the gateway after the grace period. Pass it on: the gateway shuts down
+# cleanly (about a second when idle) and releases its state lock.
+stop_gateway() {
+  kill -TERM "$GATEWAY_PID" 2>/dev/null
+  wait "$GATEWAY_PID" 2>/dev/null
+  exit 0
+}
+trap stop_gateway TERM INT
 
 # Wait for gateway to be ready (up to 60s).
 for i in $(seq 1 60); do

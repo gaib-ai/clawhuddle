@@ -33,8 +33,8 @@ RUN brew install gh gogcli && brew cleanup -s && rm -rf /home/linuxbrew/.cache/H
 ENV GH_CONFIG_DIR=/root/.openclaw/gh \
     GOG_HOME=/root/.openclaw/gog
 # npm 11.19+ skips dependency install scripts unless allowed; these are the ones
-# openclaw 2026.11.2 pulls in (earlier images ran them by default).
-RUN npm install -g --allow-scripts=openclaw,esbuild,protobufjs,@google/genai openclaw@2026.11.2
+# openclaw 2026.11.x pulls in (earlier images ran them by default).
+RUN npm install -g --allow-scripts=openclaw,esbuild,protobufjs,@google/genai openclaw@2026.11.10
 # Chromium for OpenClaw's browser tool. OpenClaw drives it over CDP through the
 # playwright-core it bundles, so install the matching build with that CLI (same
 # step as the official image's OPENCLAW_INSTALL_BROWSER). It lives inside the
@@ -61,5 +61,6 @@ COPY patch-control-ui.sh /patch-control-ui.sh
 RUN sh /patch-control-ui.sh && rm /patch-control-ui.sh
 COPY entrypoint.sh /entrypoint.sh
 COPY pending-devices.cjs /usr/local/bin/clawhuddle-pending-devices
-RUN chmod +x /entrypoint.sh /usr/local/bin/clawhuddle-pending-devices
+COPY recover-state-lock.sh /usr/local/bin/clawhuddle-recover-lock
+RUN chmod +x /entrypoint.sh /usr/local/bin/clawhuddle-pending-devices /usr/local/bin/clawhuddle-recover-lock
 ENTRYPOINT ["/entrypoint.sh"]

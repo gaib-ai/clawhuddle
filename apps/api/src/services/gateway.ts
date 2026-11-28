@@ -944,8 +944,9 @@ const OFFLINE_AUTH_TIMEOUT_MS = 120_000;
  * `image` on the instance's state dir, with no network. The key travels in a
  * transient 0600 file in that dir, never on a command line or in a log.
  *
- * `image` must be the image the instance itself runs: a newer OpenClaw would
- * migrate the state one way.
+ * `image` must be the image the instance last ran on: the CLI of a newer
+ * OpenClaw refuses state that Doctor has not upgraded yet (2026.11.10 on 11.2
+ * state: "state database schema migration pending", then "config is invalid").
  *
  * auth-profiles.json is moved aside for the run: while that file holds a
  * credential the store has not imported yet (i.e. the very key being changed),
@@ -986,6 +987,18 @@ export async function saveAuthProfilesOffline(
   }
 }
 
+/**
+ * The instance's container is down, but its gateway was most likely killed
+ * (`docker stop` on an image without the entrypoint's signal trap, a busy
+ * gateway past the 10 s grace period, a crash) and still holds the state lock.
+ * OpenClaw 2026.11.5+ never takes over a lock whose owner it cannot inspect,
+ * which is every owner from another container, so the image's helper clears it
+ * first (docker/gateway/recover-state-lock.sh). Images without the helper are
+ * 11.2, where the lock runs out by itself: see ownerLeaseWaitMs.
+ */
+const AUTH_SAVE_RECOVER_LOCK =
+  "if command -v clawhuddle-recover-lock >/dev/null 2>&1; then clawhuddle-recover-lock; fi; ";
+
 /** One offline CLI run in a throwaway container. */
 async function runAuthSave(
   g: GatewayRow,
@@ -1002,6 +1015,7 @@ async function runAuthSave(
       // Arguments are passed as argv, never spliced into the script.
       Entrypoint: [
         "sh", "-c",
+        AUTH_SAVE_RECOVER_LOCK +
         'if [ -n "$5" ]; then exec openclaw models auth "$1" --agent "$5" --provider "$2" --profile-id "$3" < "$4"; ' +
           'else exec openclaw models auth "$1" --provider "$2" --profile-id "$3" < "$4"; fi',
         "sh", args.command, args.provider, args.profileId, `/root/.openclaw/${args.valueFile}`, args.agent ?? "",
@@ -1062,10 +1076,11 @@ function readAuthOwnerAgent(g: GatewayRow): string | null {
 }
 
 /**
- * A gateway that was killed rather than shut down (ours always are: `docker
- * stop` ends in SIGKILL) still owns the state until its heartbeat is 90 s old,
- * and the CLI in another container refuses until then ("the owner heartbeat is
- * fresh … wait 59 s and retry"). We wait that long, once per boot.
+ * OpenClaw 2026.11.2 only (later images clear the lock, see
+ * AUTH_SAVE_RECOVER_LOCK): a gateway that was killed rather than shut down
+ * still owns the state until its heartbeat is 90 s old, and the CLI in another
+ * container refuses until then ("the owner heartbeat is fresh … wait 59 s and
+ * retry"). We wait that long, once per boot.
  */
 const OWNER_LEASE_MAX_WAIT_MS = 110_000;
 function ownerLeaseWaitMs(output: string): number | null {
@@ -1324,6 +1339,9 @@ export async function deployGateway(orgId: string, gatewayId: string) {
   const g = getGatewayRow(orgId, gatewayId);
   const containerName = containerNameFor(g);
 
+  // The image the state was last run on, for the key save below.
+  const previousImage = await docker.getContainer(containerName).inspect().then((info) => info.Image, () => undefined);
+
   // Stop and remove old container
   await removeContainer(containerName);
 
@@ -1344,7 +1362,10 @@ export async function deployGateway(orgId: string, gatewayId: string) {
   await installSkillsForUser(path.join(g.org_id, gatewayDirName(g.user_id, g.slot)), getMemberSkills(orgId, g.user_id));
 
   // After the config is written: the CLI records the profile in openclaw.json too.
-  await saveAuthProfilesOffline(g, auth.profiles, staleProfiles, GATEWAY_IMAGE);
+  // With the previous container's image, not the new one: when this deploy
+  // moves the instance to a newer OpenClaw, only the old CLI can still write
+  // the state (Doctor upgrades it at the boot that follows).
+  await saveAuthProfilesOffline(g, auth.profiles, staleProfiles, previousImage || GATEWAY_IMAGE);
 
   const container = await docker.createContainer(createContainerConfig(g));
   await container.start();

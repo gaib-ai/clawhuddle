@@ -33,6 +33,8 @@ const docker = vi.hoisted(() => ({
   /** What a failed throwaway container printed. */
   offlineOutput: 'cli said no\n',
   removed: [] as string[],
+  /** Image id an existing instance container reports. */
+  image: undefined as string | undefined,
 }));
 vi.mock('dockerode', () => {
   // A docker exec stream without a TTY is framed: type byte, 3 zero bytes,
@@ -58,7 +60,7 @@ vi.mock('dockerode', () => {
     async logs() { return frame(2, docker.offlineOutput); }
     async restart() { docker.restarted.push(this.name); }
     async inspect() {
-      return { State: { Running: true }, NetworkSettings: { Ports: {} } };
+      return { State: { Running: true }, NetworkSettings: { Ports: {} }, Image: docker.image };
     }
     async exec(opts: { Cmd: string[] }) {
       docker.execs.push(opts.Cmd);
@@ -312,6 +314,7 @@ describe('who may touch an instance', () => {
 
     afterEach(() => {
       docker.offlineRun = () => 0;
+      docker.image = undefined;
       docker.offlineOutput = 'cli said no\n';
       fs.rmSync(path.join(dir(), 'state'), { recursive: true, force: true });
       vi.restoreAllMocks();
@@ -343,6 +346,40 @@ describe('who may touch an instance', () => {
       const agentDir = path.join(dir(), 'agents', 'main', 'agent');
       expect(fs.readFileSync(path.join(agentDir, 'auth-profiles.json'), 'utf-8')).toContain('AIza-test');
       expect(fs.readdirSync(agentDir)).not.toContain('.clawhuddle-auth-profiles.held');
+    });
+
+    it("clears a killed gateway's state lock before the save, on images that can", async () => {
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      setStored({ 'google:manual': { type: 'api_key', provider: 'google', key: 'AIza-old' } });
+      docker.offlineRun = pasteApiKey({});
+      expect((await restart()).statusCode).toBe(200);
+      const script = docker.offline[0].Entrypoint[2] as string;
+      // Skipped where the helper does not exist (2026.11.2 images), and never fatal.
+      expect(script.startsWith('if command -v clawhuddle-recover-lock >/dev/null 2>&1; then clawhuddle-recover-lock; fi; ')).toBe(true);
+      expect(script.indexOf('clawhuddle-recover-lock; fi;')).toBeLessThan(script.indexOf('openclaw models auth'));
+    });
+
+    it('saves with the image the instance last ran on when a redeploy moves it to a new one', async () => {
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      const theirs = (await mine(OTHER)).data[0].id;
+      const redeploy = async () => {
+        docker.offline.length = 0;
+        docker.started.length = 0;
+        setStored({ 'google:manual': { type: 'api_key', provider: 'google', key: 'AIza-old' } });
+        return app.inject({ method: 'POST', url: `/api/orgs/${ORG}/gateways/${theirs}/redeploy`, headers: await as(OTHER) });
+      };
+      docker.offlineRun = pasteApiKey({});
+
+      // The newer CLI refuses state its Doctor has not upgraded yet; the old one can still write it.
+      docker.image = 'sha256:previous';
+      expect((await redeploy()).statusCode).toBe(200);
+      expect(docker.offline[0].Image).toBe('sha256:previous');
+      expect(docker.started).toEqual(['clawhuddle-authsave-org-1-user-oth', 'clawhuddle-gw-org-1-user-oth']);
+      expect(stored()['google:manual'].key).toBe('AIza-test');
+
+      docker.image = undefined; // no container to ask
+      expect((await redeploy()).statusCode).toBe(200);
+      expect(docker.offline[0].Image).toBe('clawhuddle-gateway:local');
     });
 
     it('waits out the killed gateway\'s hold on the state, then saves', async () => {

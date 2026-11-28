@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { generateOpenClawConfig, mergeOpenClawConfig } from './openclaw-config.js';
+import { PROVIDERS } from '@clawhuddle/shared';
 
 const base = {
   port: 6100,
@@ -24,27 +25,27 @@ describe('generateOpenClawConfig (OpenClaw 2026.10.x schema)', () => {
 });
 
 describe('default model', () => {
-  it('defaults the primary to Gemini 4 Hydrogen when no provider is pinned', () => {
-    expect(generateOpenClawConfig(base).agents!.defaults.model.primary).toBe('google/gemini-4-hydrogen');
+  it('defaults the primary to Gemini 3.8 Flash when no provider is pinned', () => {
+    expect(generateOpenClawConfig(base).agents!.defaults.model.primary).toBe('google/gemini-3.8-flash');
   });
 
-  it('uses Gemini 4 Hydrogen for a pinned google provider without a model override', () => {
+  it('uses Gemini 3.8 Flash for a pinned google provider without a model override', () => {
     const cfg = generateOpenClawConfig({ ...base, primaryProviderId: 'google' });
-    expect(cfg.agents!.defaults.model.primary).toBe('google/gemini-4-hydrogen');
-  });
-
-  it('keeps an instance pinned to Gemini 3.8 Flash on it after Flash left the pick-list', () => {
-    const cfg = generateOpenClawConfig({ ...base, primaryProviderId: 'google', primaryModel: 'google/gemini-3.8-flash' });
-    const defaults = cfg.agents!.defaults;
-    expect(defaults.model.primary).toBe('google/gemini-3.8-flash');
-    expect(defaults.modelPolicy!.allow).toContain('google/gemini-3.8-flash');
-    expect(cfg.models!.providers.google!.models!.map((m) => m.id)).toContain('gemini-3.8-flash');
-  });
-
-  it('a key still overridden to Gemini 3.8 Flash keeps that model for a provider pin', () => {
-    const cfg = generateOpenClawConfig({ ...base, primaryProviderId: 'google', modelOverrides: { google: 'google/gemini-3.8-flash' } });
     expect(cfg.agents!.defaults.model.primary).toBe('google/gemini-3.8-flash');
-    expect(cfg.agents!.defaults.modelPolicy!.allow).toContain('google/gemini-4-hydrogen');
+  });
+
+  it('an instance pinned to another Gemini model runs on it', () => {
+    const cfg = generateOpenClawConfig({ ...base, primaryProviderId: 'google', primaryModel: 'google/gemini-4-argon' });
+    const defaults = cfg.agents!.defaults;
+    expect(defaults.model.primary).toBe('google/gemini-4-argon');
+    expect(defaults.modelPolicy!.allow).toContain('google/gemini-4-argon');
+    expect(cfg.models!.providers.google!.models!.map((m) => m.id)).toContain('gemini-4-argon');
+  });
+
+  it('a key overridden to Gemini 4 Hydrogen uses that model for a provider pin', () => {
+    const cfg = generateOpenClawConfig({ ...base, primaryProviderId: 'google', modelOverrides: { google: 'google/gemini-4-hydrogen' } });
+    expect(cfg.agents!.defaults.model.primary).toBe('google/gemini-4-hydrogen');
+    expect(cfg.agents!.defaults.modelPolicy!.allow).toContain('google/gemini-3.8-flash');
   });
 
   it('a pin to a retired model keeps working (no longer offered, still declared)', () => {
@@ -70,26 +71,44 @@ describe('default model', () => {
   it('loads every catalog model of the active providers so members can switch inside OpenClaw', () => {
     const defaults = generateOpenClawConfig({ ...base, primaryProviderId: 'google' }).agents!.defaults;
     const loaded = Object.keys(defaults.models);
-    for (const id of ['google/gemini-4-hydrogen', 'google/gemini-4-neon', 'google/gemini-4-argon', 'tokenkiosk/azure/gpt-5.5', 'tokenkiosk/claude-sonnet-5', 'tokenkiosk/minimax-m3.1-flash']) {
+    for (const id of ['google/gemini-3.8-flash', 'google/gemini-4-hydrogen', 'google/gemini-4-neon', 'google/gemini-4-argon', 'tokenkiosk/azure/gpt-5.5', 'tokenkiosk/claude-sonnet-5', 'tokenkiosk/minimax-m3.1-flash']) {
       expect(loaded).toContain(id);
     }
-    expect(loaded[0]).toBe('google/gemini-4-hydrogen');
-    // No longer offered, so not loaded unless something is pinned to it.
-    expect(loaded).not.toContain('google/gemini-3.8-flash');
+    expect(loaded[0]).toBe('google/gemini-3.8-flash');
     expect(defaults.modelPolicy!.allow).toEqual(loaded);
+    // Retired models stay declared but not selectable.
+    expect(loaded).not.toContain('tokenkiosk/claude-opus-latest');
     // Fallbacks stay one per provider.
     expect(defaults.model.fallbacks).toEqual(['tokenkiosk/azure/gpt-5.5']);
   });
 
+  it('keeps a retired former default on the allowlist: automations and sessions inside OpenClaw still name it', () => {
+    // 2026-11-27: taking Gemini 3.8 Flash off the list failed every automation that carried it as its model.
+    const kiosk = PROVIDERS.find((p) => p.id === 'token-kiosk')!;
+    const before = kiosk.formerDefaults;
+    kiosk.formerDefaults = ['tokenkiosk/claude-opus-latest'];
+    try {
+      const allow = generateOpenClawConfig({ ...base, primaryProviderId: 'google' }).agents!.defaults.modelPolicy!.allow;
+      expect(allow).toContain('tokenkiosk/claude-opus-latest');
+      // Offered models come first, so the picker order inside OpenClaw is unchanged.
+      expect(allow.indexOf('tokenkiosk/claude-opus-latest')).toBeGreaterThan(allow.indexOf('tokenkiosk/minimax-m3.1-flash'));
+      // A provider the member has no key for contributes nothing.
+      const googleOnly = generateOpenClawConfig({ ...base, activeProviderIds: ['google'], primaryProviderId: 'google' }).agents!.defaults;
+      expect(googleOnly.modelPolicy!.allow).not.toContain('tokenkiosk/claude-opus-latest');
+    } finally {
+      kiosk.formerDefaults = before;
+    }
+  });
+
   it('ignores a pinned model whose provider the member has no key for', () => {
     const cfg = generateOpenClawConfig({ ...base, primaryProviderId: 'google', primaryModel: 'anthropic/claude-fable-5' });
-    expect(cfg.agents!.defaults.model.primary).toBe('google/gemini-4-hydrogen');
+    expect(cfg.agents!.defaults.model.primary).toBe('google/gemini-3.8-flash');
     expect(Object.keys(cfg.agents!.defaults.models)).not.toContain('anthropic/claude-fable-5');
   });
 });
 
 describe('google catalog extension', () => {
-  it('declares the Gemini models we offer and the retired Flash', () => {
+  it('declares the Gemini models we offer', () => {
     const google = generateOpenClawConfig(base).models!.providers.google!;
     expect(google).not.toHaveProperty('apiKey');
     expect(google.models!.map((m) => m.id)).toEqual(
@@ -194,6 +213,30 @@ describe('reply latency defaults (2026-10-16)', () => {
     existing.agents.defaults.heartbeat = { isolatedSession: false };
     const optedOut = mergeOpenClawConfig(existing as Parameters<typeof mergeOpenClawConfig>[0], base) as unknown as Record<string, any>;
     expect(optedOut.agents.defaults.heartbeat).toEqual({ isolatedSession: false });
+  });
+
+  it('stops writing agents.defaults.heartbeat once OpenClaw 2026.11.5+ has taken the config over', () => {
+    // From 11.5 the heartbeat is an automation and the key makes the config invalid.
+    const merge = (version: string, heartbeat?: unknown) => {
+      const existing = generateOpenClawConfig(base) as unknown as Record<string, any>;
+      existing.meta = { lastTouchedVersion: version };
+      if (heartbeat === undefined) delete existing.agents.defaults.heartbeat;
+      else existing.agents.defaults.heartbeat = heartbeat;
+      return (mergeOpenClawConfig(existing as Parameters<typeof mergeOpenClawConfig>[0], base) as unknown as Record<string, any>).agents.defaults;
+    };
+    // Doctor converted and removed it: it stays gone.
+    expect(merge('2026.11.10')).not.toHaveProperty('heartbeat');
+    expect(merge('2026.11.5')).not.toHaveProperty('heartbeat');
+    expect(merge('2026.12.1')).not.toHaveProperty('heartbeat');
+    expect(merge('2027.1.0')).not.toHaveProperty('heartbeat');
+    // Our own block written back by an older API (Michael's instance, 2026-11-27): removed.
+    expect(merge('2026.11.10', { isolatedSession: true })).not.toHaveProperty('heartbeat');
+    // A setting Doctor could not convert is the member's to resolve: as found, nothing added.
+    expect(merge('2026.11.10', { every: '0m' }).heartbeat).toEqual({ every: '0m' });
+    // Not there yet: the key is still needed, and Doctor converts it at the first 11.5+ boot.
+    expect(merge('2026.11.2').heartbeat).toEqual({ isolatedSession: true });
+    expect(merge('2026.11.4', { every: '0m' }).heartbeat).toEqual({ isolatedSession: true, every: '0m' });
+    expect(merge('2026.2.17').heartbeat).toEqual({ isolatedSession: true });
   });
 
   it('keeps agents.defaults.systemAgent, which OpenClaw writes on a multi-agent instance', () => {

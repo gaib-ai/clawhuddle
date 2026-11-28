@@ -310,6 +310,25 @@ export interface OpenClawConfig {
   };
 }
 
+/** What the platform writes into `agents.defaults.heartbeat` (OpenClaw before 2026.11.5 only). */
+const PLATFORM_HEARTBEAT = { isolatedSession: true } as const;
+
+/**
+ * OpenClaw 2026.11.5 moved the heartbeat to Automations: Doctor converts
+ * `agents.defaults.heartbeat` into a job at the first boot on that version and
+ * removes the key, and from then on the config schema refuses it. Doctor stamps
+ * `meta.lastTouchedVersion` in the same run, so that is how we tell an instance
+ * that has made the move from one that still needs the key.
+ */
+export function heartbeatConfigRetired(config: Record<string, unknown>): boolean {
+  const version = (config.meta as { lastTouchedVersion?: unknown } | undefined)?.lastTouchedVersion;
+  const m = typeof version === 'string' ? /^(\d+)\.(\d+)\.(\d+)/.exec(version) : null;
+  if (!m) return false;
+  const [year, minor, patch] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (year !== 2026) return year > 2026;
+  return minor > 11 || (minor === 11 && patch >= 5);
+}
+
 export function generateOpenClawConfig(options: {
   port: number;
   token: string;
@@ -467,8 +486,7 @@ export function generateOpenClawConfig(options: {
       ],
     };
   }
-  // Google: the models we offer (and the ones we used to) are declared under
-  // the built-in provider. OpenClaw's catalog did not know gemini-4-argon or
+  // Google: the models we offer are declared under the built-in provider. OpenClaw's catalog did not know gemini-4-argon or
   // gemini-3.8-flash on 2026.10.x (referencing them failed with "Unknown
   // model"); 2026.11.2 lists all of these, but an instance's catalog can be
   // older than the Gemini API, so the declaration stays. Declaring only
@@ -480,11 +498,10 @@ export function generateOpenClawConfig(options: {
   // all; 64k out for Hydrogen, Neon and 3.8 Flash, 32k out for Argon.
   customProviders.google = {
     models: [
+      { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', reasoning: true, input: ['text', 'image'], contextWindow: 1048576, maxTokens: 65536 },
       { id: 'gemini-4-hydrogen', name: 'Gemini 4 Hydrogen', reasoning: true, input: ['text', 'image'], contextWindow: 1048576, maxTokens: 65536 },
       { id: 'gemini-4-neon', name: 'Gemini 4 Neon', reasoning: true, input: ['text', 'image'], contextWindow: 1048576, maxTokens: 65536 },
       { id: 'gemini-4-argon', name: 'Gemini 4 Argon', reasoning: true, input: ['text', 'image'], contextWindow: 1048576, maxTokens: 32768 },
-      // No longer offered (2026-11-27); kept for instances and keys pinned to it.
-      { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', reasoning: true, input: ['text', 'image'], contextWindow: 1048576, maxTokens: 65536 },
     ],
   };
   if (Object.keys(customProviders).length > 0) {
@@ -495,11 +512,11 @@ export function generateOpenClawConfig(options: {
   //  - If the org pinned a primary provider (Admin → API Keys) AND the member
   //    has a key for it, that provider's model (honoring the per-provider
   //    model override) becomes primary; other active providers are fallbacks.
-  //  - Otherwise the primary defaults to google/gemini-4-hydrogen (Gemini 3.8
-  //    Flash until 2026-11-27, Gemini 4 Argon until 2026-10-28) — NOT the
-  //    first active provider — so gateways behave consistently no matter
-  //    which keys happen to exist.
-  const DEFAULT_PRIMARY = 'google/gemini-4-hydrogen';
+  //  - Otherwise the primary defaults to google/gemini-3.8-flash (Gemini 4
+  //    Argon until 2026-10-28; Gemini 4 Hydrogen for a few hours on
+  //    2026-11-27) — NOT the first active provider — so gateways behave
+  //    consistently no matter which keys happen to exist.
+  const DEFAULT_PRIMARY = 'google/gemini-3.8-flash';
   const overrides = options.modelOverrides ?? {};
   const resolveModel = (p: (typeof PROVIDERS)[number]) => overrides[p.id] || p.defaultModel;
 
@@ -531,9 +548,16 @@ export function generateOpenClawConfig(options: {
   // just the primary and fallbacks: Doctor derives modelPolicy.allow from this
   // map, so this is what members can switch between inside OpenClaw (/model,
   // Control UI). The key's override is included too in case it is off-catalog.
+  // So is a retired model that used to be a provider's default
+  // (`formerDefaults`; none today): automations and sessions created under it
+  // carry their own copy of the ref, and a ref missing from the allowlist
+  // fails every run ("automation model override … rejected by
+  // agents.defaults.modelPolicy.allow"; 2026-11-27, when Gemini 3.8 Flash was
+  // taken off the list for a few hours). Other retired models stay declared
+  // but off the list.
   const models: Record<string, ModelEntry> = { [primary]: pinned ? entryFor(pinned) : {} };
   for (const p of activeProviders) {
-    for (const m of [...(p.models ?? []).map((m) => m.id), resolveModel(p)]) {
+    for (const m of [...(p.models ?? []).map((m) => m.id), resolveModel(p), ...(p.formerDefaults ?? [])]) {
       if (!(m in models)) models[m] = entryFor(p);
     }
   }
@@ -561,7 +585,12 @@ export function generateOpenClawConfig(options: {
       // session, up to 294 s a run). A fresh session per run costs ~2–5k tokens;
       // delivery still follows the heartbeat's target. A member's own
       // agents.entries.<id>.heartbeat.isolatedSession still wins.
-      heartbeat: { isolatedSession: true },
+      //
+      // Only for a config OpenClaw 2026.11.5+ has not touched yet: from that
+      // version the heartbeat is an automation and this key is refused. Doctor
+      // turns it into the "heartbeat-main" job (isolated) at the first boot and
+      // removes it; mergeOpenClawConfig must not put it back (heartbeatConfigRetired).
+      heartbeat: { ...PLATFORM_HEARTBEAT },
     },
     list: [{ id: 'main', default: true, reasoningDefault: 'off' }],
   };
@@ -670,11 +699,21 @@ export function mergeOpenClawConfig(
     const prevDefaults = (merged.agents as Record<string, unknown>).defaults as Record<string, unknown> | undefined;
     const prevHeartbeat = prevDefaults?.heartbeat;
     const defaults: Record<string, unknown> = { ...generated.agents.defaults };
-    // agents.defaults.heartbeat predates the platform writing it (members set
-    // e.g. `every: '0m'` there), so the member's keys win and the platform's
-    // isolatedSession only fills in what is missing.
-    if (prevHeartbeat && typeof prevHeartbeat === 'object' && !Array.isArray(prevHeartbeat)) {
-      defaults.heartbeat = { ...(generated.agents.defaults.heartbeat ?? {}), ...prevHeartbeat };
+    const memberHeartbeat = prevHeartbeat && typeof prevHeartbeat === 'object' && !Array.isArray(prevHeartbeat);
+    if (heartbeatConfigRetired(existing)) {
+      // This OpenClaw refuses the key ("agents.defaults: Unrecognized key:
+      // heartbeat": config reloads and most CLI commands stop working), so the
+      // platform's own block goes. Anything else still there is a setting Doctor
+      // could not convert and reports at boot; it stays as found for the member.
+      delete defaults.heartbeat;
+      if (memberHeartbeat && JSON.stringify(prevHeartbeat) !== JSON.stringify(PLATFORM_HEARTBEAT)) {
+        defaults.heartbeat = prevHeartbeat;
+      }
+    } else if (memberHeartbeat) {
+      // agents.defaults.heartbeat predates the platform writing it (members set
+      // e.g. `every: '0m'` there), so the member's keys win and the platform's
+      // isolatedSession only fills in what is missing.
+      defaults.heartbeat = { ...(generated.agents.defaults.heartbeat ?? {}), ...(prevHeartbeat as object) };
     }
     // agents.defaults.systemAgent is OpenClaw's own: on an instance with more
     // than one agent it names the agent that owns operations without an
