@@ -21,6 +21,8 @@ describe('renderPlatformInstructions', () => {
     for (const facts of [{ notion: false, google: false }, { notion: true, google: true }]) {
       const text = renderPlatformInstructions(facts);
       expect(text).toContain('## Staying quiet');
+      expect(text).toContain('## Scheduled runs');
+      expect(text).toContain('automations({ action: "record_result", outcome: "no_change" })');
       expect(text).toContain('exactly `NO_REPLY`');
       expect(text).toContain('`<!-- NO_REPLY -->`');
     }

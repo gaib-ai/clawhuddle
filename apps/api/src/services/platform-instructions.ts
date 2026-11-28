@@ -29,6 +29,18 @@ export function renderPlatformInstructions(facts: PlatformInstructionFacts): str
     // `<!-- standing by silently … -->`), 31 times in 3 weeks; OpenClaw only
     // suppresses the bare token, so each one was posted to Slack.
     'When you decide not to answer in a chat, your entire reply must be exactly `NO_REPLY`, with nothing before or after it. Anything else is posted to the chat as a message, including an HTML comment such as `<!-- NO_REPLY -->` or `<!-- silent -->`, a note on why you are staying quiet, or an empty code block.',
+    '',
+    '## Scheduled runs',
+    '',
+    // 2026-11-28: OpenClaw 2026.11.5+ asks every scheduled run to record a
+    // result, but Code Mode shows the tool as `automations { action; ... }`
+    // without its fields. Gemini Flash guessed `status: "no_change"`, the call
+    // failed, and a failed tool call in a run that ends with NO_REPLY marks
+    // the whole run as failed ("⚠️ Automations failed"; 10 in a row disable
+    // the automation). 3 of 4 quiet runs failed on Sandworm; 8 of 8 passed
+    // with this note. Worded as a condition: OpenClaw 2026.11.2 has no
+    // record_result action.
+    'A scheduled run may ask you to record its result with `record_result`. When it does and there is nothing new to report, the call is exactly `automations({ action: "record_result", outcome: "no_change" })`. The field is `outcome`, not `status` or `result`. For a real result, `outcome` is one of `progress`, `done`, `blocked` or `needs_attention`, with a short `summary`. Record once per run.',
   ];
 
   if (facts.notion) {
