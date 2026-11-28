@@ -35,6 +35,12 @@ const docker = vi.hoisted(() => ({
   removed: [] as string[],
   /** Image id an existing instance container reports. */
   image: undefined as string | undefined,
+  /** Full config of every instance container, by name (latest wins). */
+  configs: {} as Record<string, any>,
+  /** The `User` each exec ran as, in step with `execs`. */
+  execUsers: [] as (string | undefined)[],
+  /** stdout of the Hermes image's helper, by its command (`usage`, `google-start`, …). */
+  helper: {} as Record<string, string>,
 }));
 vi.mock('dockerode', () => {
   // A docker exec stream without a TTY is framed: type byte, 3 zero bytes,
@@ -62,8 +68,10 @@ vi.mock('dockerode', () => {
     async inspect() {
       return { State: { Running: true }, NetworkSettings: { Ports: {} }, Image: docker.image };
     }
-    async exec(opts: { Cmd: string[] }) {
+    async exec(opts: { Cmd: string[]; User?: string }) {
       docker.execs.push(opts.Cmd);
+      docker.execUsers.push(opts.User);
+      const helper = opts.Cmd[1] === '/opt/clawhuddle/helper.py' ? docker.helper[opts.Cmd[2]] : undefined;
       const isList = opts.Cmd.slice(0, 3).join(' ') === 'openclaw devices list';
       const isCheck = opts.Cmd[0] === 'clawhuddle-pending-devices';
       const sh = opts.Cmd[0] === 'sh'
@@ -72,7 +80,8 @@ vi.mock('dockerode', () => {
       const chunks = isList
         ? [frame(2, 'warn: something on stderr\n'), frame(1, docker.devicesJson.slice(0, 10)), frame(1, docker.devicesJson.slice(10))]
         : isCheck ? [frame(1, docker.pendingCheck.stdout)]
-        : sh !== undefined ? [frame(1, sh)] : [];
+        : sh !== undefined ? [frame(1, sh)]
+        : helper !== undefined ? [frame(1, helper)] : [];
       return {
         start: async () => ({
           resume() {},
@@ -86,12 +95,15 @@ vi.mock('dockerode', () => {
     }
   }
   class Docker {
-    getNetwork() { return { inspect: async () => ({}) }; }
+    getNetwork() { return { inspect: async () => ({ IPAM: { Config: [{ Subnet: '172.20.0.0/16' }, { Subnet: 'fd00::/64' }, { Subnet: '0.0.0.0/0' }] } }) }; }
     async createNetwork() {}
     getContainer(name: string) { return new Container(name); }
     async createContainer(cfg: { name: string; Entrypoint?: string[] }) {
       if (cfg.Entrypoint) docker.offline.push(cfg);
-      else docker.created.push(cfg.name);
+      else {
+        docker.created.push(cfg.name);
+        docker.configs[cfg.name] = cfg;
+      }
       return new Container(cfg.name, cfg);
     }
     async listContainers() { return []; }
@@ -461,7 +473,7 @@ describe('who may touch an instance', () => {
 
     const byOwner = await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/gateways/${adminsInstance.id}/access`, headers: await as(OWNER) });
     expect(byOwner.statusCode).toBe(200);
-    expect(byOwner.json().data).toEqual({ gateway_token: adminsInstance.token, gateway_subdomain: adminsInstance.subdomain, gateway_port: 6100 });
+    expect(byOwner.json().data).toEqual({ runtime: 'openclaw', gateway_token: adminsInstance.token, gateway_subdomain: adminsInstance.subdomain, gateway_port: 6100 });
     expect(byOwner.headers['cache-control']).toBe('no-store');
   });
 
@@ -1006,5 +1018,297 @@ describe('maintainers', () => {
     expect((await req(MAINT, 'POST', '/gateways/redeploy-all')).statusCode).toBe(403);
     expect((await req(MAINT, 'GET', '/device-requests')).statusCode).toBe(403);
     expect((await req(MAINT, 'GET', '/api-keys')).statusCode).toBe(403);
+  });
+});
+
+
+describe('Hermes instances', () => {
+  const HERMIT = { id: 'user-hermit', email: 'hermit@example.com' };
+  const NAME = 'clawhuddle-gw-org-1-user-her';
+  const home = () => path.join(tmpDir, 'data', 'gateways', ORG, HERMIT.id);
+  const managed = () => path.join(tmpDir, 'data', 'gateways', ORG, '.hermes', HERMIT.id);
+  const req = async (by: { id: string }, method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE', url: string, payload?: object) =>
+    app.inject({ method, url: `/api/orgs/${ORG}${url}`, headers: await as(by), ...(payload ? { payload } : {}) });
+  const row = async () => (await mine(HERMIT)).data[0];
+  const helperCalls = () => docker.execs.filter((c) => c[1] === '/opt/clawhuddle/helper.py').map((c) => c.slice(2));
+
+  beforeAll(async () => {
+    const { getDb } = await import('../../db/index.js');
+    const db = getDb();
+    db.prepare('INSERT INTO users (id, email) VALUES (?, ?)').run(HERMIT.id, HERMIT.email);
+    db.prepare("INSERT INTO org_members (id, org_id, user_id, role) VALUES (?, ?, ?, 'member')").run(om(HERMIT), ORG, HERMIT.id);
+  });
+
+  it('are refused until the organization turns them on', async () => {
+    const res = await createOwn(HERMIT, { runtime: 'hermes' });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe('runtime_disabled');
+    expect((await createOwn(HERMIT, { runtime: 'skynet' })).statusCode).toBe(400);
+    expect(await mine(HERMIT)).toMatchObject({ current: 0 });
+  });
+
+  it('are switched on by an admin, with a real boolean only', async () => {
+    expect((await req(MEMBER, 'PATCH', '', { hermes_enabled: true })).statusCode).toBe(403);
+    expect((await req(ADMIN, 'PATCH', '', { hermes_enabled: 'yes' })).statusCode).toBe(400);
+    const res = await req(ADMIN, 'PATCH', '', { hermes_enabled: true });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.hermes_enabled).toBe(true);
+    const orgs = (await app.inject({ method: 'GET', url: '/api/orgs', headers: await as(HERMIT) })).json().data;
+    expect(orgs.find((o: any) => o.id === ORG).hermes_enabled).toBe(true);
+  });
+
+  it('deploy on the Hermes image with the home and a read-only managed layer', async () => {
+    const res = await createOwn(HERMIT, { runtime: 'hermes', label: 'hermes one' });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().data).toMatchObject({ slot: 1, runtime: 'hermes', status: 'deploying', label: 'hermes one' });
+    expect(docker.created.at(-1)).toBe(NAME);
+
+    const cfg = docker.configs[NAME];
+    const { token, subdomain } = await row();
+    expect(cfg.Image).toBe('clawhuddle-hermes:local');
+    expect(cfg.Cmd).toEqual(['gateway', 'run']);
+    expect(cfg.HostConfig.Binds).toEqual([`${home()}:/opt/data`, `${managed()}:/etc/hermes:ro`]);
+    expect(cfg.Env).toContain(`HERMES_DASHBOARD_BASIC_AUTH_USERNAME=${subdomain}`);
+    expect(cfg.Env).toContain(`HERMES_DASHBOARD_PUBLIC_URL=https://${subdomain}.example.com`);
+    // The password (the instance token) and the keys are nowhere in what Docker stores.
+    const stored = JSON.stringify(cfg);
+    expect(stored).not.toContain(token);
+    expect(stored).not.toContain('AIza-test');
+    expect(JSON.stringify(cfg.Labels)).toContain('9119');
+    // One path on the instance's host is the API's sign-in helper; everything else is the dashboard.
+    const open = `traefik.http.routers.${cfg.name}-open`;
+    expect(cfg.Labels[`${open}.rule`]).toBe(`Host(\`${subdomain}.example.com\`) && Path(\`/_clawhuddle/open\`)`);
+    expect(cfg.Labels[`${open}.service`]).toBe('api@docker');
+    expect(cfg.Labels[`traefik.http.routers.${cfg.name}.service`]).toBe(cfg.name);
+  });
+
+  it('get keys and the model through the managed layer, and leave the member a seeded config', async () => {
+    const env = fs.readFileSync(path.join(managed(), '.env'), 'utf-8');
+    expect(env).toContain('GOOGLE_API_KEY="AIza-test"');
+    expect(env).toContain('NOTION_API_KEY="ntn_test_token"');
+    const config = JSON.parse(fs.readFileSync(path.join(managed(), 'config.yaml'), 'utf-8'));
+    expect(config.model).toMatchObject({ provider: 'gemini', default: 'gemini-3.8-flash' });
+    // Forwarded headers are trusted from the gateway network only (IPv4, never an open range).
+    expect(config.dashboard).toEqual({ trusted_proxies: ['172.20.0.0/16'] });
+
+    expect(fs.readFileSync(path.join(home(), 'config.yaml'), 'utf-8')).toContain('cwd: /opt/data/workspace');
+    expect(fs.existsSync(path.join(home(), 'openclaw.json'))).toBe(false);
+    expect(fs.existsSync(path.join(home(), '.env'))).toBe(false);
+    for (const skill of ['clawhuddle-platform', 'notion']) {
+      expect(fs.existsSync(path.join(home(), 'skills', 'clawhuddle', skill, 'SKILL.md'))).toBe(true);
+    }
+  });
+
+  it('count against the same per-member limit as OpenClaw instances', async () => {
+    await req(ADMIN, 'PATCH', `/members/${om(HERMIT)}`, { max_gateways: 1 });
+    const res = await createOwn(HERMIT);
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toMatchObject({ error: 'gateway_limit', limit: 1, current: 1 });
+  });
+
+  it('report running once the dashboard says its gateway is up, asked as the hermes user', async () => {
+    docker.execs.length = 0;
+    docker.execUsers.length = 0;
+    const g = await row();
+    const res = await req(HERMIT, 'GET', `/gateways/${g.id}/status`);
+    expect(res.json().data.status).toBe('running');
+    expect(docker.execs[0][0]).toBe('/opt/hermes/.venv/bin/python');
+    expect(docker.execs[0][2]).toContain('/api/status');
+    expect(docker.execUsers[0]).toBe('hermes');
+    // No OpenClaw follow-up (secret store, device check) on a Hermes instance.
+    expect(docker.execs.flat().join(' ')).not.toContain('openclaw');
+  });
+
+  it('hand an admin the sign-in instead of a token link', async () => {
+    const g = await row();
+    const res = await req(ADMIN, 'GET', `/gateways/${g.id}/access`);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toEqual({
+      runtime: 'hermes', gateway_token: g.token, gateway_subdomain: g.subdomain, gateway_port: 9119, dashboard_username: g.subdomain,
+    });
+  });
+
+  it('keep what the member changed in their own config across a redeploy', async () => {
+    const g = await row();
+    const file = path.join(home(), 'config.yaml');
+    fs.writeFileSync(file, 'agent:\n  reasoning_effort: high\n');
+    expect((await req(HERMIT, 'POST', `/gateways/${g.id}/redeploy`)).statusCode).toBe(200);
+    expect(fs.readFileSync(file, 'utf-8')).toBe('agent:\n  reasoning_effort: high\n');
+    expect(docker.removed).toContain(NAME);
+  });
+
+  it('follow a model pin and a new key without a restart', async () => {
+    const { setGatewayState } = await import('../../services/gateway-store.js');
+    const g = await row();
+    setGatewayState(g.id, { status: 'running' });
+    docker.restarted.length = 0;
+    const created = docker.created.length;
+
+    const key = await req(ADMIN, 'POST', '/api-keys', { provider: 'token-kiosk', key: 'sk-kiosk-test', credentialType: 'api_key' });
+    expect(key.statusCode).toBe(201);
+    expect(fs.readFileSync(path.join(managed(), '.env'), 'utf-8')).toContain('TOKEN_KIOSK_API_KEY="sk-kiosk-test"');
+
+    const pin = await req(HERMIT, 'PATCH', `/gateways/${g.id}`, { primary_model: 'tokenkiosk/claude-sonnet-5' });
+    expect(pin.statusCode).toBe(200);
+    const config = JSON.parse(fs.readFileSync(path.join(managed(), 'config.yaml'), 'utf-8'));
+    expect(config.model).toMatchObject({ provider: 'custom:tokenkiosk', default: 'claude-sonnet-5' });
+    expect(config.providers.tokenkiosk).toEqual({
+      base_url: 'https://agent-router.gaib.ai/v1', key_env: 'TOKEN_KIOSK_API_KEY', api_mode: 'chat_completions',
+      models: ['azure/gpt-5.5', 'claude-sonnet-5', 'minimax-m3.1-flash'], discover_models: false,
+    });
+    expect(JSON.stringify(config)).not.toContain('sk-kiosk-test');
+    expect(config.dashboard).toEqual({ trusted_proxies: ['172.20.0.0/16'] });
+
+    expect(docker.restarted).toEqual([]);
+    expect(docker.created.length).toBe(created);
+  });
+
+  it('show Notion and the Google client as installed on the API Keys page', async () => {
+    const mineStatus = (await req(HERMIT, 'GET', '/me/api-keys/secret-status')).json().data;
+    expect(mineStatus[0].secrets).toMatchObject({ notion: 'injected', 'google-workspace': 'injected' });
+    const client = JSON.parse(fs.readFileSync(path.join(home(), 'google_client_secret.json'), 'utf-8'));
+    expect(client.installed.client_id).toBe('123456789012-abc.apps.googleusercontent.com');
+    // The secret-store sync of OpenClaw never ran here.
+    expect(fs.existsSync(path.join(home(), '.clawhuddle-secrets.json'))).toBe(false);
+  });
+
+  it("never replace a Google client the member installed themselves", async () => {
+    const state = path.join(managed(), 'clawhuddle-state.json');
+    const saved = fs.readFileSync(state, 'utf-8');
+    fs.writeFileSync(state, '{}');
+    fs.writeFileSync(path.join(home(), 'google_client_secret.json'), '{"installed":{"client_id":"own","client_secret":"own"}}');
+    const g = await row();
+    expect((await req(HERMIT, 'POST', `/gateways/${g.id}/restart`)).statusCode).toBe(200);
+    expect(fs.readFileSync(path.join(home(), 'google_client_secret.json'), 'utf-8')).toContain('"own"');
+    expect((await req(HERMIT, 'GET', '/me/api-keys/secret-status')).json().data[0].secrets['google-workspace']).toBe('member');
+    // Back to the platform's client for the tests below.
+    fs.rmSync(path.join(home(), 'google_client_secret.json'));
+    fs.writeFileSync(state, saved);
+    const { setGatewayState } = await import('../../services/gateway-store.js');
+    setGatewayState(g.id, { status: 'running' });
+  });
+
+  it('connect one Google account through the helper, the pasted address passed in a file', async () => {
+    const g = await row();
+    const call = (by: { id: string }, method: 'GET' | 'POST' | 'DELETE', suffix: string, payload?: object) =>
+      req(by, method, `/gateways/${g.id}/google${suffix}`, payload);
+
+    // The client file was removed above: the first read puts the platform's back.
+    expect((await call(HERMIT, 'GET', '')).json().data).toEqual({ readiness: 'ready', accounts: [] });
+    expect((await call(ADMIN, 'POST', '/start', { email: 'hermit@example.com' })).statusCode).toBe(403);
+
+    docker.helper = {
+      'google-start': '{"auth_url":"https://accounts.google.com/o/oauth2/auth?client_id=x"}',
+      'google-finish': '{"ok":true}',
+      'google-revoke': '{"ok":true}',
+    };
+    const start = await call(HERMIT, 'POST', '/start', { email: 'hermit@example.com' });
+    expect(start.statusCode).toBe(200);
+    expect(start.json().data.authUrl).toMatch(/^https:\/\/accounts\.google\.com\//);
+
+    expect((await call(HERMIT, 'POST', '/finish', { email: 'hermit@example.com', url: 'https://evil.example/?code=c&state=s' })).statusCode).toBe(400);
+    docker.execs.length = 0;
+    const url = 'http://localhost:1/?state=s123&code=4%2Fsecret-code&scope=email';
+    const finish = await call(HERMIT, 'POST', '/finish', { email: 'hermit@example.com', url });
+    expect(finish.statusCode).toBe(200);
+    expect(helperCalls()).toEqual([['google-finish', '/opt/data/.clawhuddle-google-redirect.tmp', 'hermit@example.com']]);
+    expect(docker.execs.flat().join(' ')).not.toContain('secret-code');
+    expect(fs.existsSync(path.join(home(), '.clawhuddle-google-redirect.tmp'))).toBe(false);
+
+    // What the helper leaves behind after a real sign-in.
+    fs.writeFileSync(path.join(home(), 'google_token.json'), '{}');
+    fs.writeFileSync(path.join(home(), '.clawhuddle-google.json'), '{"email":"hermit@example.com"}');
+    expect((await call(ADMIN, 'GET', '')).json().data.accounts).toEqual([
+      { email: 'hermit@example.com', services: ['gmail', 'calendar', 'drive', 'contacts', 'sheets', 'docs'] },
+    ]);
+    expect((await call(HERMIT, 'DELETE', '/accounts/hermit%40example.com')).statusCode).toBe(200);
+    expect(helperCalls().at(-1)).toEqual(['google-revoke']);
+  });
+
+  it('reports a helper error without the secrets it may quote', async () => {
+    const g = await row();
+    docker.helper['google-start'] = '{"error":"token exchange failed for code=4/abc with GOCSPX-leaky"}';
+    const res = await req(HERMIT, 'POST', `/gateways/${g.id}/google/start`, { email: 'hermit@example.com' });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().message).not.toContain('GOCSPX-leaky');
+  });
+
+  it('approve a chat pairing with the code as its own argument', async () => {
+    const g = await row();
+    const pair = (code: string) => req(HERMIT, 'POST', `/gateways/${g.id}/channels/slack/pair`, { code });
+    expect((await pair('abc; rm -rf /')).statusCode).toBe(400);
+    docker.execs.length = 0;
+    expect((await pair('ABCD-1234')).statusCode).toBe(200);
+    expect(docker.execs).toEqual([['/opt/hermes/bin/hermes', 'pairing', 'approve', 'slack', 'ABCD-1234']]);
+
+    docker.helper['pairing-list'] = '{"pending":[{"platform":"slack","user_id":"U1","user_name":"sam","age_minutes":3}]}';
+    const list = await req(HERMIT, 'GET', `/gateways/${g.id}/channels/slack/pair`);
+    expect(list.json().data.output).toContain('sam (U1) · waiting 3 min');
+    expect((await req(HERMIT, 'GET', `/gateways/${g.id}/channels/irc/pair`)).statusCode).toBe(400);
+  });
+
+  it('take channel tokens into the managed env', async () => {
+    const g = await row();
+    const put = await req(HERMIT, 'PUT', `/gateways/${g.id}/channels/slack`, { bot_token: 'xoxb-h', app_token: 'xapp-h' });
+    expect(put.statusCode).toBe(200);
+    const env = fs.readFileSync(path.join(managed(), '.env'), 'utf-8');
+    expect(env).toContain('SLACK_BOT_TOKEN="xoxb-h"');
+    expect(env).toContain('SLACK_APP_TOKEN="xapp-h"');
+    expect(fs.statSync(path.join(managed(), '.env')).mode & 0o007).toBe(0);
+  });
+
+  it('have no device requests', async () => {
+    const g = await row();
+    const { setGatewayState } = await import('../../services/gateway-store.js');
+    setGatewayState(g.id, { status: 'running' });
+    docker.execs.length = 0;
+    expect((await req(HERMIT, 'GET', '/me/device-requests')).json().data).toEqual([]);
+    expect((await req(HERMIT, 'GET', `/gateways/${g.id}/devices`)).json().data).toEqual([]);
+    expect(docker.execs).toEqual([]);
+    const res = await req(HERMIT, 'POST', `/gateways/${g.id}/devices/0f6f2c1e-6a3e-4d4c-9b1c-0f3f2b9d1a11/approve`);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().message).toMatch(/Hermes/);
+  });
+
+  it('report usage in the same shape as an OpenClaw instance', async () => {
+    const g = await row();
+    const t = (totalTokens: number, totalCost: number) => ({ input: totalTokens, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens, totalCost });
+    docker.helper.usage = JSON.stringify({
+      totals: t(900, 0.3), sessions: 3,
+      messages: { total: 12, user: 5, assistant: 7, toolCalls: 2, toolResults: 2, errors: 0 },
+      byModel: [{ provider: 'gemini', model: 'gemini-3.8-flash', calls: 7, totals: t(900, 0.3) }],
+      byChannel: [{ channel: 'slack', tokens: 600, cost: 0.2 }, { channel: 'other', tokens: 300, cost: 0.1 }],
+      daily: [{ date: '2026-11-27', tokens: 900, cost: 0.3, messages: 12, toolCalls: 2, errors: 0 }],
+    });
+    docker.execs.length = 0;
+    const res = await req(HERMIT, 'GET', `/gateways/${g.id}/usage?days=7`);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toMatchObject({ gateway_id: g.id, cacheStatus: 'fresh', totals: { totalTokens: 900 } });
+    expect(res.json().data.byModel[0]).toMatchObject({ provider: 'google', model: 'gemini-3.8-flash' });
+    expect(helperCalls()[0][0]).toBe('usage');
+    expect(docker.execs.flat().join(' ')).not.toContain('sessions.usage');
+  });
+
+  it('keep running when the organization turns Hermes off again; only new ones are refused', async () => {
+    expect((await req(OWNER, 'PATCH', '', { hermes_enabled: false })).json().data.hermes_enabled).toBe(false);
+    await req(ADMIN, 'PATCH', `/members/${om(HERMIT)}`, { max_gateways: 2 });
+    expect((await createOwn(HERMIT, { runtime: 'hermes' })).statusCode).toBe(403);
+    const g = await row();
+    expect((await req(HERMIT, 'POST', `/gateways/${g.id}/restart`)).statusCode).toBe(200);
+    // The same member can still add an OpenClaw instance next to it.
+    const second = await createOwn(HERMIT);
+    expect(second.statusCode).toBe(201);
+    expect(second.json().data).toMatchObject({ slot: 2, runtime: 'openclaw' });
+    expect(docker.configs[`${NAME}-2`].Image).not.toBe('clawhuddle-hermes:local');
+  });
+
+  it('are removed with their home and their managed layer', async () => {
+    const g = await row();
+    const res = await req(HERMIT, 'DELETE', `/gateways/${g.id}`);
+    expect(res.statusCode).toBe(200);
+    expect(fs.existsSync(home())).toBe(false);
+    expect(fs.existsSync(managed())).toBe(false);
+    // The OpenClaw instance next to it is untouched.
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'gateways', ORG, `${HERMIT.id}-2`, 'openclaw.json'))).toBe(true);
   });
 });

@@ -96,6 +96,7 @@ export default function DeviceRequestsPage() {
             <p className="text-xs mt-1" style={{ color: 'var(--text-tertiary)' }}>
               Each browser or device that opens an assistant for the first time has to be let in here.
               {isAdmin ? ' You see requests for every instance in the organization.' : ' Only you can approve devices for your instances.'}
+              {' '}Hermes instances are not listed: their dashboard has a sign-in instead (shown on the instance’s card on Home).
             </p>
           </div>
           <span

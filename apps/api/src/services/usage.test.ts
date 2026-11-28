@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { condenseSessionsUsage, localClock, parseCliJson, snapshotWindows, usageWindow } from './usage.js';
+import { condenseHermesUsage, condenseSessionsUsage, localClock, parseCliJson, snapshotWindows, usageWindow } from './usage.js';
 
 const t = (totalTokens: number, totalCost = 0, extra: Record<string, number> = {}) => ({
   input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens, totalCost, missingCostEntries: 0, ...extra,
@@ -113,5 +113,50 @@ describe('nightly snapshot windows', () => {
   it('gives the whole previous month on the 1st', () => {
     expect(snapshotWindows('2026-12-01').month).toEqual({ startDate: '2026-11-01', endDate: '2026-11-30' });
     expect(snapshotWindows('2027-01-01')['7d']).toEqual({ startDate: '2026-12-25', endDate: '2026-12-31' });
+  });
+});
+
+
+describe('condenseHermesUsage', () => {
+  // The shape docker/hermes/helper.py prints for `usage <start> <end> <tz>`.
+  const HELPER = {
+    totals: t(1500, 0.9, { input: 1000, output: 200, cacheRead: 300 }),
+    sessions: 4,
+    messages: { total: 20, user: 8, assistant: 12, toolCalls: 5, toolResults: 5, errors: 1 },
+    byModel: [
+      { provider: 'gemini', model: 'gemini-3.8-flash', calls: 9, totals: t(1000, 0.4) },
+      { provider: 'custom', baseUrl: 'https://agent-router.gaib.ai/v1', model: 'azure/gpt-5.5', calls: 3, totals: t(500, 0.5) },
+    ],
+    byChannel: [{ channel: 'slack', tokens: 1100, cost: 0.6 }, { channel: 'other', tokens: 400, cost: 0.3 }],
+    daily: [{ date: '2026-11-26', tokens: 1500, cost: 0.9, messages: 20, toolCalls: 5, errors: 1 }],
+  };
+  const window = { startDate: '2026-11-22', endDate: '2026-11-28' };
+
+  it('maps the helper output onto the same GatewayUsage as an OpenClaw instance', () => {
+    const usage = condenseHermesUsage('gw-h', HELPER, window);
+    expect(usage).toMatchObject({ gateway_id: 'gw-h', cacheStatus: 'fresh', sessions: 4, startDate: '2026-11-22', endDate: '2026-11-28' });
+    expect(usage.totals).toMatchObject({ totalTokens: 1500, totalCost: 0.9, input: 1000 });
+    expect(usage.byModel.map((m) => [m.provider, m.model, m.totals.totalTokens])).toEqual([
+      ['google', 'gemini-3.8-flash', 1000],
+      ['tokenkiosk', 'azure/gpt-5.5', 500],
+    ]);
+    expect(usage.byChannel.map((c) => [c.channel, c.tokens])).toEqual([['slack', 1100], ['other', 400]]);
+    expect(usage.daily).toHaveLength(7);
+    expect(usage.daily.find((d) => d.date === '2026-11-26')).toMatchObject({ tokens: 1500, messages: 20 });
+  });
+
+  it('names providers as the rest of the Usage page does, and leaves unknown ones as Hermes logged them', () => {
+    const names = (byModel: object[]) => condenseHermesUsage('gw-h', { ...HELPER, byModel }, window).byModel.map((m) => m.provider);
+    expect(names([
+      { provider: 'custom', baseUrl: 'http://claw-proxy:3456/v1/', model: 'a', calls: 1, totals: t(1) },
+      { provider: 'custom', baseUrl: 'https://example.com/v1', model: 'b', calls: 1, totals: t(1) },
+      { provider: 'openai-api', model: 'c', calls: 1, totals: t(1) },
+      { provider: 'nous', model: 'd', calls: 1, totals: t(1) },
+    ])).toEqual(['claw', 'custom', 'openai', 'nous']);
+  });
+
+  it('survives an empty or missing answer', () => {
+    expect(condenseHermesUsage('gw-h', {}, window).totals.totalTokens).toBe(0);
+    expect(condenseHermesUsage('gw-h', null, window).byModel).toEqual([]);
   });
 });

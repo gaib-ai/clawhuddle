@@ -79,6 +79,7 @@ services:
       - GATEWAY_NETWORK=clawhuddle-gateways
       - DOMAIN=${DOMAIN:-localhost}
       - GATEWAY_DOMAIN=${GATEWAY_DOMAIN:-}
+      - HERMES_IMAGE=${HERMES_IMAGE:-}  # optional: override clawhuddle-hermes:local
       - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:3000}
     labels:
       - "traefik.enable=true"
@@ -91,6 +92,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       gateway-base:
+        condition: service_completed_successfully
+      hermes-base:
         condition: service_completed_successfully
     networks:
       - clawhuddle-net
@@ -119,6 +122,16 @@ services:
     entrypoint: []
     networks:
       - clawhuddle-net
+
+  # Hermes Agent runtime image (instances whose runtime is `hermes`). Like
+  # gateway-base, it only exists to build the image the API starts containers from.
+  hermes-base:
+    build:
+      context: ./docker/hermes
+    image: clawhuddle-hermes:local
+    command: ["echo", "Hermes image built"]
+    entrypoint: []
+    network_mode: none
 
 networks:
   # Platform services: traefik, web, api

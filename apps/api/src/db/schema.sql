@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS organizations (
     primary_provider TEXT,
     primary_model TEXT,
     max_gateways_per_user INTEGER,
+    hermes_enabled INTEGER NOT NULL DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -58,6 +59,7 @@ CREATE TABLE IF NOT EXISTS gateways (
     primary_provider TEXT,
     primary_model TEXT,
     slack_access_migrated_at TEXT,
+    runtime TEXT NOT NULL DEFAULT 'openclaw',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(member_id, slot)
 );

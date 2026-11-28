@@ -1,4 +1,4 @@
-import Docker from "dockerode";
+import type Docker from "dockerode";
 import Database from "better-sqlite3";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -35,29 +35,46 @@ import {
 import type { DevicePairingRequest, DeviceRequestList, SecretInjectionState, Skill } from "@clawhuddle/shared";
 import { PROVIDERS } from "@clawhuddle/shared";
 
-export { getContainerName, GatewayLimitError } from "./gateway-store.js";
+import {
+  GATEWAY_DOMAIN,
+  GATEWAY_NETWORK,
+  IS_LOCAL_DEV,
+  createTraefikLabels,
+  demuxDockerStream,
+  docker,
+  ensureNetwork,
+  execInContainer,
+  removeContainer,
+} from "./docker.js";
 
-const docker = new Docker();
+import {
+  approveHermesPairing,
+  checkHermesHealth,
+  finishHermesGoogleSignIn,
+  getHermesGoogleAccounts,
+  getHermesHostPort,
+  hermesContainerConfig,
+  hermesFilesExist,
+  hermesSecretStatus,
+  listHermesPairing,
+  prepareHermesDeploy,
+  removeHermesGoogleAccount,
+  removeHermesManagedDir,
+  startHermesGoogleSignIn,
+  syncHermesFiles,
+} from "./hermes.js";
+import { HERMES_DASHBOARD_PORT } from "./hermes-config.js";
+import type { GatewayRuntime } from "@clawhuddle/shared";
+
+export { getContainerName, GatewayLimitError } from "./gateway-store.js";
+export { demuxDockerStream, execInContainer } from "./docker.js";
 
 const GATEWAY_IMAGE = "clawhuddle-gateway:local";
 // OpenClaw listens on loopback:6100; socat bridges external traffic on 0.0.0.0:6101
 const GATEWAY_EXTERNAL_PORT = 6101;
-// Gateways run agent-controlled code, so they get a network of their own shared
-// only with what they must reach (Traefik, claw-proxy) — never the API or web.
-const GATEWAY_NETWORK = process.env.GATEWAY_NETWORK || "clawhuddle-gateways";
-const DOMAIN = process.env.DOMAIN || "localhost";
-const GATEWAY_DOMAIN = process.env.GATEWAY_DOMAIN || DOMAIN;
 
 /** How an instance is referred to in log lines: <orgId>/<userId>[-<slot>]. */
 const refLabel = (ref: GatewayRef) => `${ref.org_id}/${gatewayDirName(ref.user_id, ref.slot)}`;
-
-async function ensureNetwork(): Promise<void> {
-  try {
-    await docker.getNetwork(GATEWAY_NETWORK).inspect();
-  } catch {
-    await docker.createNetwork({ Name: GATEWAY_NETWORK, Driver: "bridge" });
-  }
-}
 
 async function checkGatewayHealth(containerName: string): Promise<boolean> {
   try {
@@ -101,40 +118,6 @@ function getMemberSkills(orgId: string, userId: string): Skill[] {
        SELECT * FROM skills WHERE type = 'mandatory' AND enabled = 1 AND org_id = ?`,
     )
     .all(userId, orgId, orgId) as Skill[];
-}
-
-function createTraefikLabels(
-  containerName: string,
-  subdomain: string,
-): Record<string, string> {
-  return {
-    "traefik.enable": "true",
-    // Traefik is on both networks; reach the gateway over the gateway network
-    "traefik.docker.network": GATEWAY_NETWORK,
-    [`traefik.http.routers.${containerName}.rule`]: `Host(\`${subdomain}.${GATEWAY_DOMAIN}\`)`,
-    [`traefik.http.routers.${containerName}.entrypoints`]: "web",
-    // Traefik connects to socat port (0.0.0.0:6101) which forwards to OpenClaw loopback port
-    [`traefik.http.services.${containerName}.loadbalancer.server.port`]: String(
-      GATEWAY_EXTERNAL_PORT,
-    ),
-    // Forward real client attribution. OpenClaw 2026.8+ rejects proxied requests whose
-    // forwarded client IP resolves to loopback (proxy_attribution_required), so the old
-    // trick of spoofing X-Forwarded-For: 127.0.0.1 to look local no longer works —
-    // Traefik's own appended X-Forwarded-For plus gateway.trustedProxies (which includes
-    // the Cloudflare ranges) attributes the request to the real client instead.
-    // Strip Cloudflare pseudo-headers; attribution comes from X-Forwarded-For alone
-    [`traefik.http.middlewares.${containerName}-headers.headers.customrequestheaders.CF-Connecting-IP`]:
-      "",
-    [`traefik.http.middlewares.${containerName}-headers.headers.customrequestheaders.True-Client-IP`]:
-      "",
-    [`traefik.http.middlewares.${containerName}-headers.headers.customrequestheaders.CF-IPCountry`]:
-      "",
-    [`traefik.http.middlewares.${containerName}-headers.headers.customrequestheaders.CF-Ray`]:
-      "",
-    [`traefik.http.middlewares.${containerName}-headers.headers.customrequestheaders.CF-Visitor`]:
-      "",
-    [`traefik.http.routers.${containerName}.middlewares`]: `${containerName}-headers`,
-  };
 }
 
 /**
@@ -358,6 +341,7 @@ function secretsOutOfDate(ref: GatewayRef, secrets: ManagedSecret[]): boolean {
  * touched, whatever key the org holds.
  */
 export function secretStatusFor(g: GatewayRow): Record<string, SecretInjectionState> {
+  if (g.runtime === "hermes") return hermesSecretStatus(g);
   const auth = writeAuthProfiles(g, false);
   const resolved = new Map(auth.secrets.map((s) => [s.provider, s] as const));
   const state = readSecretState(g);
@@ -385,6 +369,8 @@ const secretSyncInFlight = new Map<string, Promise<void>>();
  * Idempotent; one run per gateway at a time; never throws.
  */
 export function ensureGatewaySecrets(g: GatewayRow): Promise<void> {
+  // Hermes has no secret store to fill: its keys are files, written by regenerateGatewayConfig.
+  if (g.runtime === "hermes") return Promise.resolve();
   const inFlight = secretSyncInFlight.get(g.id);
   if (inFlight) return inFlight;
   const run = syncGatewaySecrets(g)
@@ -649,6 +635,7 @@ function googleReadiness(g: GatewayRow): GoogleSignInReadiness {
 
 export async function getGoogleAccounts(orgId: string, gatewayId: string): Promise<GoogleAccountsInfo> {
   const g = requireRunning(orgId, gatewayId);
+  if (g.runtime === "hermes") return getHermesGoogleAccounts(g);
   const readiness = googleReadiness(g);
   if (readiness === "pending") void ensureGatewaySecrets(g);
   if (readiness !== "ready") return { readiness, accounts: [] };
@@ -663,6 +650,7 @@ export async function getGoogleAccounts(orgId: string, gatewayId: string): Promi
 export async function startGoogleSignIn(orgId: string, gatewayId: string, email: string): Promise<{ authUrl: string }> {
   assertEmail(email);
   const g = requireRunning(orgId, gatewayId);
+  if (g.runtime === "hermes") return startHermesGoogleSignIn(g);
   if (googleReadiness(g) !== "ready") throw new Error("Google sign-in is not set up on this instance yet");
   let out: string;
   try {
@@ -682,7 +670,7 @@ function assertRedirect(raw: string): string {
   let u: URL;
   try { u = new URL(String(raw).trim()); } catch { throw new Error("Paste the full address from the browser’s address bar"); }
   if (!["127.0.0.1", "localhost"].includes(u.hostname) || u.protocol !== "http:") {
-    throw new Error("That is not the address Google redirected to (it starts with http://127.0.0.1)");
+    throw new Error("That is not the address Google redirected to (it starts with http://127.0.0.1 or http://localhost)");
   }
   if (u.searchParams.get("error")) throw new Error(`Google reported: ${u.searchParams.get("error")}`);
   if (!u.searchParams.get("code") || !u.searchParams.get("state")) throw new Error("The address has no sign-in code; paste it exactly as shown");
@@ -693,6 +681,7 @@ export async function finishGoogleSignIn(orgId: string, gatewayId: string, email
   assertEmail(email);
   const url = assertRedirect(redirectUrl);
   const g = requireRunning(orgId, gatewayId);
+  if (g.runtime === "hermes") return finishHermesGoogleSignIn(g, email, url);
   const tmp = ".clawhuddle-google-redirect.tmp";
   const hostPath = path.join(getGatewayDir(g), tmp);
   fs.writeFileSync(hostPath, url, { mode: 0o600 });
@@ -712,6 +701,7 @@ export async function finishGoogleSignIn(orgId: string, gatewayId: string, email
 export async function removeGoogleAccount(orgId: string, gatewayId: string, email: string): Promise<GoogleAccountsInfo> {
   assertEmail(email);
   const g = requireRunning(orgId, gatewayId);
+  if (g.runtime === "hermes") return removeHermesGoogleAccount(g);
   try {
     await execGog(containerNameFor(g), 'exec gog auth remove "$0" --force --no-input', [email]);
   } catch (err) {
@@ -1139,8 +1129,6 @@ async function saveEachAuthProfile(
   }
 }
 
-const IS_LOCAL_DEV = DOMAIN === "localhost";
-
 /** Compute Control UI allowed origins for a gateway subdomain. */
 function getControlUiOrigins(subdomain: string): { allowedOrigins?: string[]; useHostHeaderFallback?: boolean } {
   if (IS_LOCAL_DEV) {
@@ -1219,6 +1207,13 @@ function writePlatformInstructions(g: GatewayRow): void {
  * as a no-op.
  */
 function regenerateGatewayConfig(g: GatewayRow): boolean {
+  if (g.runtime === "hermes") {
+    // Keys, channel tokens and the model live in files Hermes reads on its own:
+    // rewriting them is the whole sync, running or not.
+    if (!hermesFilesExist(g)) return false;
+    syncHermesFiles(g);
+    return true;
+  }
   if (!fs.existsSync(getGatewayDir(g))) return false;
 
   // OpenClaw 2026.10.x keeps credentials in SQLite and treats auth-profiles.json
@@ -1287,7 +1282,7 @@ function createContainerConfig(g: GatewayRow) {
     Image: GATEWAY_IMAGE,
     name: containerName,
     Env: [],
-    Labels: createTraefikLabels(containerName, g.subdomain),
+    Labels: createTraefikLabels(containerName, g.subdomain, GATEWAY_EXTERNAL_PORT),
     ExposedPorts: { [`${GATEWAY_EXTERNAL_PORT}/tcp`]: {} },
     HostConfig: hostConfig,
     NetworkingConfig: {
@@ -1314,16 +1309,6 @@ async function getHostPort(containerName: string): Promise<number | null> {
   }
 }
 
-async function removeContainer(containerName: string): Promise<void> {
-  try {
-    const existing = docker.getContainer(containerName);
-    await existing.stop().catch(() => {});
-    await existing.remove();
-  } catch {
-    // Container doesn't exist, that's fine
-  }
-}
-
 /** What lifecycle calls hand back: the row as the owner may see it, minus the token. */
 function publicState(g: GatewayRow) {
   return summarizeGateway(g);
@@ -1338,6 +1323,7 @@ export async function deployGateway(orgId: string, gatewayId: string) {
   await ensureNetwork();
   const g = getGatewayRow(orgId, gatewayId);
   const containerName = containerNameFor(g);
+  if (g.runtime === "hermes") return deployHermesGateway(g);
 
   // The image the state was last run on, for the key save below.
   const previousImage = await docker.getContainer(containerName).inspect().then((info) => info.Image, () => undefined);
@@ -1380,17 +1366,40 @@ export async function deployGateway(orgId: string, gatewayId: string) {
 }
 
 /**
+ * A Hermes instance: files first (they are all it needs; there is no auth
+ * store to save into and nothing to migrate), then a fresh container.
+ */
+async function deployHermesGateway(g: GatewayRow) {
+  const containerName = containerNameFor(g);
+  // Before the old container goes: a member without a usable key keeps what is running.
+  await prepareHermesDeploy(g, getMemberSkills(g.org_id, g.user_id));
+  await removeContainer(containerName);
+
+  const container = await docker.createContainer(hermesContainerConfig(g));
+  await container.start();
+
+  const port = (await getHermesHostPort(containerName)) || HERMES_DASHBOARD_PORT;
+  setGatewayState(g.id, { port, status: "deploying" });
+  return publicState(getGatewayRow(g.org_id, g.id));
+}
+
+/**
  * Adds an instance for a member (subject to their limit) and deploys it. A
  * failed first deploy leaves nothing behind: the row, directory and any
  * half-made container are removed before the error is rethrown.
  */
-export async function createGateway(orgId: string, memberId: string, opts: { label?: string | null } = {}) {
+export async function createGateway(
+  orgId: string,
+  memberId: string,
+  opts: { label?: string | null; runtime?: GatewayRuntime } = {},
+) {
   const g = createGatewayRow(orgId, memberId, opts);
   try {
     return await deployGateway(orgId, g.id);
   } catch (err) {
     await removeContainer(containerNameFor(g));
     fs.rmSync(getGatewayDir(g), { recursive: true, force: true });
+    if (g.runtime === "hermes") removeHermesManagedDir(g);
     deleteGatewayRow(g.id);
     throw err;
   }
@@ -1423,6 +1432,12 @@ export async function startGateway(orgId: string, gatewayId: string) {
   // boots: the importer would otherwise skip the id it already has and the
   // gateway would come back up on the old credential without saying so.
   const container = docker.getContainer(containerNameFor(g));
+  if (g.runtime === "hermes") {
+    syncHermesFiles(g);
+    await container.start();
+    setGatewayState(g.id, { status: "deploying" });
+    return publicState(getGatewayRow(orgId, gatewayId));
+  }
   await syncAuthBeforeBoot(g, container);
   ensureGogEnv(g);
 
@@ -1444,6 +1459,12 @@ export async function restartGateway(orgId: string, gatewayId: string) {
   await container.stop().catch((err: any) => {
     if (err?.statusCode !== 304) throw err; // 304 = already stopped
   });
+  if (g.runtime === "hermes") {
+    syncHermesFiles(g);
+    await container.start();
+    setGatewayState(g.id, { status: "deploying" });
+    return publicState(getGatewayRow(orgId, gatewayId));
+  }
   await syncAuthBeforeBoot(g, container);
   ensureGogEnv(g);
 
@@ -1461,6 +1482,7 @@ export async function removeGateway(orgId: string, gatewayId: string) {
   // Files first: the row's DB cascade cannot remove Traefik configs
   removePortForwardsForGateway(g.id);
   fs.rmSync(getGatewayDir(g), { recursive: true, force: true });
+  if (g.runtime === "hermes") removeHermesManagedDir(g);
   deleteGatewayRow(g.id);
 
   return { id: g.id, member_id: g.member_id, user_id: g.user_id, slot: g.slot, removed: true };
@@ -1511,7 +1533,8 @@ export async function getGatewayStatus(orgId: string, gatewayId: string) {
       actual = "stopped";
     } else {
       // Container is running — check if gateway HTTP is actually ready
-      actual = (await checkGatewayHealth(containerName)) ? "running" : "deploying";
+      const healthy = g.runtime === "hermes" ? checkHermesHealth(containerName) : checkGatewayHealth(containerName);
+      actual = (await healthy) ? "running" : "deploying";
     }
   } catch {
     // Container doesn't exist
@@ -1519,6 +1542,7 @@ export async function getGatewayStatus(orgId: string, gatewayId: string) {
   }
 
   if (actual !== g.status) setGatewayState(g.id, { status: actual });
+  if (g.runtime === "hermes") return publicState({ ...g, status: actual });
   const auth = actual === "running" ? writeAuthProfiles(g, false) : null;
   if (auth && (g.status !== "running" || secretsOutOfDate(g, auth.secrets) || gogClientOutOfDate(g, auth.gogClient))) {
     void ensureGatewaySecrets({ ...g, status: actual });
@@ -1526,67 +1550,15 @@ export async function getGatewayStatus(orgId: string, gatewayId: string) {
   return publicState({ ...g, status: actual });
 }
 
-/**
- * Split a docker attach/exec stream into stdout and stderr. Without a TTY the
- * daemon multiplexes both into 8-byte-header frames (type, 3 zero bytes,
- * big-endian length); anything that doesn't parse as frames is passed through
- * as stdout so a plain stream still works.
- */
-export function demuxDockerStream(raw: Buffer): { stdout: string; stderr: string } {
-  const out: Buffer[] = [];
-  const err: Buffer[] = [];
-  let offset = 0;
-  while (offset + 8 <= raw.length) {
-    const type = raw[offset];
-    const zeros = raw[offset + 1] === 0 && raw[offset + 2] === 0 && raw[offset + 3] === 0;
-    const size = raw.readUInt32BE(offset + 4);
-    if (!zeros || type > 2 || offset + 8 + size > raw.length) {
-      return { stdout: raw.toString("utf-8"), stderr: "" };
-    }
-    (type === 2 ? err : out).push(raw.subarray(offset + 8, offset + 8 + size));
-    offset += 8 + size;
-  }
-  if (offset !== raw.length) return { stdout: raw.toString("utf-8"), stderr: "" };
-  return { stdout: Buffer.concat(out).toString("utf-8"), stderr: Buffer.concat(err).toString("utf-8") };
-}
-
-/** Run a command inside a gateway container and return its stdout. */
-export async function execInContainer(
-  containerName: string,
-  cmd: string[],
-  timeoutMs = 10000,
-): Promise<string> {
-  const container = docker.getContainer(containerName);
-  const exec = await container.exec({
-    Cmd: cmd,
-    AttachStdout: true,
-    AttachStderr: true,
-  });
-  const stream = await exec.start({});
-  return new Promise<string>((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    stream.on("data", (chunk: Buffer) => chunks.push(chunk));
-    stream.on("end", async () => {
-      try {
-        const info = await exec.inspect();
-        const { stdout, stderr } = demuxDockerStream(Buffer.concat(chunks));
-        if (info.ExitCode !== 0) {
-          reject(new Error(stderr.trim() || stdout.trim() || `Exit code ${info.ExitCode}`));
-        } else {
-          resolve(stdout);
-        }
-      } catch (err) {
-        reject(err);
-      }
-    });
-    stream.on("error", reject);
-    setTimeout(() => reject(new Error("exec timeout")), timeoutMs).unref();
-  });
-}
-
 function requireRunning(orgId: string, gatewayId: string): GatewayRow {
   const g = getGatewayRow(orgId, gatewayId);
   if (g.status !== "running") throw new Error("Gateway is not running");
+  return g;
+}
+
+/** For calls that only exist on OpenClaw (device pairing). */
+function requireOpenClaw(g: GatewayRow): GatewayRow {
+  if (g.runtime !== "openclaw") throw new Error("Not available on a Hermes instance");
   return g;
 }
 
@@ -1598,6 +1570,7 @@ export async function approvePairing(
   code: string,
 ): Promise<string> {
   const g = requireRunning(orgId, gatewayId);
+  if (g.runtime === "hermes") return approveHermesPairing(g, channel, code);
   const output = await execInContainer(containerNameFor(g), [
     "openclaw",
     "pairing",
@@ -1615,6 +1588,7 @@ export async function listPairingRequests(
   channel: string,
 ): Promise<string> {
   const g = requireRunning(orgId, gatewayId);
+  if (g.runtime === "hermes") return listHermesPairing(g, channel);
   const output = await execInContainer(containerNameFor(g), [
     "openclaw",
     "pairing",
@@ -1689,7 +1663,8 @@ async function pendingDeviceCount(containerName: string): Promise<number | null>
  */
 export async function listDeviceRequests(orgId: string, gatewayId: string): Promise<DevicePairingRequest[]> {
   const g = getGatewayRow(orgId, gatewayId);
-  if (g.status !== "running") return [];
+  // Hermes has no device pairing: its dashboard is behind the instance's own sign-in.
+  if (g.status !== "running" || g.runtime === "hermes") return [];
   const container = containerNameFor(g);
   if ((await pendingDeviceCount(container)) === 0) return [];
   const output = await execInContainer(container, ["openclaw", "devices", "list", "--json"]);
@@ -1698,13 +1673,13 @@ export async function listDeviceRequests(orgId: string, gatewayId: string): Prom
 
 export async function approveDeviceRequest(orgId: string, gatewayId: string, requestId: string): Promise<void> {
   assertRequestId(requestId);
-  const g = requireRunning(orgId, gatewayId);
+  const g = requireOpenClaw(requireRunning(orgId, gatewayId));
   await execInContainer(containerNameFor(g), ["openclaw", "devices", "approve", requestId, "--json"]);
 }
 
 export async function rejectDeviceRequest(orgId: string, gatewayId: string, requestId: string): Promise<void> {
   assertRequestId(requestId);
-  const g = requireRunning(orgId, gatewayId);
+  const g = requireOpenClaw(requireRunning(orgId, gatewayId));
   await execInContainer(containerNameFor(g), ["openclaw", "devices", "reject", requestId, "--json"]);
 }
 
@@ -1717,7 +1692,7 @@ export async function collectDeviceRequests(
   gateways: GatewayRow[],
   describe: (g: GatewayRow) => DeviceRequestList["data"][number]["gateway"] = summarizeGateway,
 ): Promise<DeviceRequestList> {
-  const running = gateways.filter((g) => g.status === "running");
+  const running = gateways.filter((g) => g.status === "running" && g.runtime !== "hermes");
   const results = await Promise.allSettled(running.map((g) => listDeviceRequests(g.org_id, g.id)));
   const data: DeviceRequestList["data"] = [];
   const errors: DeviceRequestList["errors"] = [];

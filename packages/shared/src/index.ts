@@ -31,6 +31,8 @@ export interface Organization {
   primary_model: string | null;
   /** Gateway instances each member may run. Null = platform default. */
   max_gateways_per_user: number | null;
+  /** Whether members may create Hermes Agent instances (off by default; existing ones keep running when turned off). */
+  hermes_enabled: boolean;
   created_at: string;
 }
 
@@ -41,6 +43,8 @@ export interface UpdateOrgRequest {
   primary_model?: string | null;
   /** Integer >= 1, or null to follow the platform default. */
   max_gateways_per_user?: number | null;
+  /** Allow Hermes Agent as a runtime for new instances. */
+  hermes_enabled?: boolean;
 }
 
 /**
@@ -80,16 +84,73 @@ export interface OrgMember {
 
 export type GatewayStatus = 'running' | 'stopped' | 'deploying' | 'provisioning';
 
-/** One OpenClaw container. A member may own several, numbered by `slot`. */
+/**
+ * The agent software an instance runs. Chosen when the instance is created and
+ * never changed afterwards: the two keep different state in the same data dir.
+ */
+export type GatewayRuntime = 'openclaw' | 'hermes';
+
+export const RUNTIMES: { id: GatewayRuntime; label: string; description: string }[] = [
+  {
+    id: 'openclaw',
+    label: 'OpenClaw',
+    description: 'The default. Control UI, automations, secret store, device approval.',
+  },
+  {
+    id: 'hermes',
+    label: 'Hermes Agent',
+    description: 'Nous Research\'s agent. Own dashboard with a sign-in, keys applied without a restart.',
+  },
+];
+
+export const RUNTIME_IDS = RUNTIMES.map((r) => r.id);
+
+export function isGatewayRuntime(value: unknown): value is GatewayRuntime {
+  return typeof value === 'string' && (RUNTIME_IDS as string[]).includes(value);
+}
+
+export function runtimeLabel(runtime: GatewayRuntime | null | undefined): string {
+  return RUNTIMES.find((r) => r.id === (runtime ?? 'openclaw'))?.label ?? 'OpenClaw';
+}
+
+/**
+ * One-click sign-in page for an instance whose web UI has a sign-in page
+ * (Hermes). Served by the API on the instance's own host; the web app opens it
+ * as `<instance>/_clawhuddle/open#u=<username>&p=<password>`.
+ */
+export const DASHBOARD_OPEN_PATH = '/_clawhuddle/open';
+
+/** What the web app branches on, so pages don't compare runtime names. */
+export const RUNTIME_FEATURES: Record<GatewayRuntime, {
+  /** Browsers are let in through device requests (Device Requests page). */
+  devices: boolean;
+  /** Several Google accounts can be connected to one instance. */
+  multiGoogleAccounts: boolean;
+  /**
+   * "Open" carries the instance token in the link. Otherwise the web UI has a
+   * sign-in page and "Open" goes through `DASHBOARD_OPEN_PATH`, which signs in.
+   */
+  tokenLink: boolean;
+}> = {
+  openclaw: { devices: true, multiGoogleAccounts: true, tokenLink: true },
+  hermes: { devices: false, multiGoogleAccounts: false, tokenLink: false },
+};
+
+/** One agent container. A member may own several, numbered by `slot`. */
 export interface Gateway {
   id: string;
   org_id: string;
   member_id: string;
   slot: number;
   label: string | null;
+  runtime: GatewayRuntime;
   status: GatewayStatus | null;
   port: number | null;
-  /** Bearer credential for the Control UI; only returned to the owner or via the access route. */
+  /**
+   * Bearer credential for the instance's web UI (OpenClaw: the Control UI
+   * token; Hermes: the dashboard password, with the subdomain as username).
+   * Only returned to the owner or via the access route.
+   */
   token: string | null;
   subdomain: string;
   /** Per-instance primary-provider pin; null = follow the member, then the org. */
@@ -108,6 +169,18 @@ export type GatewaySummary = Omit<Gateway, 'token'>;
 
 export interface CreateGatewayRequest {
   label?: string;
+  /** Default `openclaw`. `hermes` needs the org's Hermes switch on. */
+  runtime?: GatewayRuntime;
+}
+
+/** What `GET …/gateways/:gatewayId/access` returns: how to open one instance's web UI. */
+export interface GatewayAccess {
+  runtime: GatewayRuntime;
+  gateway_token: string | null;
+  gateway_subdomain: string;
+  gateway_port: number | null;
+  /** Hermes only: the dashboard sign-in name that goes with `gateway_token` as the password. */
+  dashboard_username?: string;
 }
 
 export interface UpdateGatewayRequest {
@@ -358,6 +431,15 @@ export interface ProviderConfig {
   kind?: 'model' | 'secret' | 'oauth-client';
   /** For `kind: 'secret'`: the store entry the key is written to, the HTTPS hosts the egress proxy may substitute it on, and the bundled skill that reads it. */
   secret?: { name: string; allowedHosts: string[]; skill?: string };
+  /**
+   * How this provider's key reaches a Hermes instance: the variable it is
+   * written to in the instance's `.env` and, for model providers, the Hermes
+   * provider id that goes into `model.provider` (`custom:<name>` = an
+   * OpenAI-compatible endpoint declared under `providers.<name>`).
+   * `tokenEnvVar` takes a setup token instead of an API key. A provider
+   * without this block is not available on Hermes instances.
+   */
+  hermes?: { provider?: string; envVar: string; tokenEnvVar?: string };
 }
 
 // Order matters: this is the display order of provider cards in the UI.
@@ -365,6 +447,7 @@ export const PROVIDERS: ProviderConfig[] = [
   {
     id: 'google', label: 'Google Gemini', envVar: 'GEMINI_API_KEY', placeholder: 'AIza...',
     defaultModel: 'google/gemini-3.8-flash',
+    hermes: { provider: 'gemini', envVar: 'GOOGLE_API_KEY' },
     // Gemini 3.8 Flash first (the platform default; Gemini 4 Hydrogen held
     // that place for a few hours on 2026-11-27), then the Gemini 4 models.
     // All are declared under models.providers.google by the config generator;
@@ -379,6 +462,7 @@ export const PROVIDERS: ProviderConfig[] = [
   {
     id: 'token-kiosk', label: 'Token Kiosk', envVar: '', placeholder: 'sk-...',
     defaultModel: 'tokenkiosk/azure/gpt-5.5',
+    hermes: { provider: 'custom:tokenkiosk', envVar: 'TOKEN_KIOSK_API_KEY' },
     // The pick-list is deliberately short (2026-10-30). The generator still
     // declares the kiosk models that were offered before, so a key or instance
     // already pinned to one keeps working.
@@ -399,6 +483,7 @@ export const PROVIDERS: ProviderConfig[] = [
   {
     id: 'anthropic', label: 'Anthropic', envVar: 'ANTHROPIC_API_KEY', placeholder: 'sk-ant-...',
     defaultModel: 'anthropic/claude-fable-5',
+    hermes: { provider: 'anthropic', envVar: 'ANTHROPIC_API_KEY', tokenEnvVar: 'ANTHROPIC_TOKEN' },
     models: [
       { id: 'anthropic/claude-fable-5', label: 'Claude Fable 5' },
       { id: 'anthropic/claude-opus-4-8', label: 'Claude Opus 4.8' },
@@ -414,6 +499,7 @@ export const PROVIDERS: ProviderConfig[] = [
   {
     id: 'openai', label: 'OpenAI', envVar: 'OPENAI_API_KEY', placeholder: 'sk-...',
     defaultModel: 'openai/gpt-4.1',
+    hermes: { provider: 'openai-api', envVar: 'OPENAI_API_KEY' },
     models: [
       { id: 'openai/gpt-4.1', label: 'GPT-4.1' },
       { id: 'openai/gpt-4.1-mini', label: 'GPT-4.1 Mini' },
@@ -423,6 +509,7 @@ export const PROVIDERS: ProviderConfig[] = [
     id: 'claw-proxy', label: 'Claw Proxy (Claude Max)', envVar: '', placeholder: 'Bearer token from claw-proxy config',
     defaultModel: 'claw/claude-sonnet-4-6',
     personalOverridable: false,
+    hermes: { provider: 'custom:claw', envVar: 'CLAW_PROXY_API_KEY' },
     models: [
       { id: 'claw/claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
       { id: 'claw/claude-opus-4-6', label: 'Claude Opus 4.6' },
@@ -446,7 +533,7 @@ export const PROVIDERS: ProviderConfig[] = [
   // catalog, not what the runtime accepts, so it is no help here; the slugs the
   // runtime knows come from the Codex CLI it bundles.
   { id: 'openai-codex', label: 'OpenAI Codex', envVar: '', placeholder: '', defaultModel: 'openai/gpt-5.6-terra', agentRuntime: 'codex', models: [{ id: 'openai/gpt-5.6-terra', label: 'GPT-5.6 Terra' }, { id: 'openai/gpt-5.6-sol', label: 'GPT-5.6 Sol' }, { id: 'openai/gpt-5.6-luna', label: 'GPT-5.6 Luna' }, { id: 'openai/gpt-5.5', label: 'GPT-5.5' }], supportsOAuth: true, oauthInstructions: 'Run `codex` and sign in with your ChatGPT account, then run `cat ~/.codex/auth.json` and paste the JSON here.' },
-  { id: 'openrouter', label: 'OpenRouter', envVar: 'OPENROUTER_API_KEY', placeholder: 'sk-or-...', defaultModel: 'openrouter/anthropic/claude-sonnet-4.5' },
+  { id: 'openrouter', label: 'OpenRouter', envVar: 'OPENROUTER_API_KEY', placeholder: 'sk-or-...', defaultModel: 'openrouter/anthropic/claude-sonnet-4.5', hermes: { provider: 'openrouter', envVar: 'OPENROUTER_API_KEY' } },
   // Not an LLM: the token lands in each instance's OpenClaw secret store
   // (entry NOTION_API_TOKEN, substituted by the egress proxy on api.notion.com
   // only) and the bundled `notion` skill is pointed at it. Exec sees the token
@@ -456,6 +543,8 @@ export const PROVIDERS: ProviderConfig[] = [
     id: 'notion', label: 'Notion', envVar: 'NOTION_API_TOKEN', placeholder: 'ntn_...', defaultModel: '',
     kind: 'secret',
     secret: { name: 'NOTION_API_TOKEN', allowedHosts: ['api.notion.com'], skill: 'notion' },
+    // Hermes has no secret store: the token is a plain `.env` variable the agent can read.
+    hermes: { envVar: 'NOTION_API_KEY' },
   },
   // Not an LLM either: the shared Google OAuth client for the gog CLI (Gmail,
   // Calendar, Drive, Docs …). Installed into every instance that has no gog
@@ -523,6 +612,20 @@ export function providerForModel(modelId: string): ProviderConfig | undefined {
     PROVIDERS.find((p) => p.models?.some((m) => m.id === modelId)) ??
     PROVIDERS.find((p) => p.retiredModels?.includes(modelId))
   );
+}
+
+/**
+ * A model ref as Hermes wants it: its own provider id plus the model id
+ * without our namespace (`google/gemini-3.8-flash` → `gemini` +
+ * `gemini-3.8-flash`; `tokenkiosk/azure/gpt-5.5` → `custom:tokenkiosk` +
+ * `azure/gpt-5.5`). Null when the provider cannot serve a Hermes instance
+ * (OpenAI Codex: its models come from OpenClaw's own Codex runtime).
+ */
+export function hermesModelRef(provider: ProviderConfig, modelId: string): { provider: string; model: string } | null {
+  if (!provider.hermes?.provider) return null;
+  const slash = modelId.indexOf('/');
+  const model = slash >= 0 ? modelId.slice(slash + 1) : modelId;
+  return model ? { provider: provider.hermes.provider, model } : null;
 }
 
 export interface SetApiKeyRequest {

@@ -28,10 +28,29 @@ const CHANNELS = [
   },
 ];
 
-function PairingSection({ gatewayId, channelId, orgFetch }: { gatewayId: string; channelId: string; orgFetch: any }) {
+/**
+ * `showWaiting` (Hermes instances): a list of who has messaged the bot and is
+ * waiting. Hermes never shows the codes themselves, only the people; the code
+ * is the one the bot sent them.
+ */
+function PairingSection({ gatewayId, channelId, orgFetch, showWaiting }: { gatewayId: string; channelId: string; orgFetch: any; showWaiting: boolean }) {
   const { toast } = useToast();
   const [pairingCode, setPairingCode] = useState('');
   const [approving, setApproving] = useState(false);
+  const [waiting, setWaiting] = useState<string | null>(null);
+  const [loadingWaiting, setLoadingWaiting] = useState(false);
+
+  const loadWaiting = async () => {
+    setLoadingWaiting(true);
+    try {
+      const res = await orgFetch(`/gateways/${gatewayId}/channels/${channelId}/pair`);
+      setWaiting(res.data.output || 'No pending pairing requests.');
+    } catch (err: any) {
+      toast(err.message, 'error');
+    } finally {
+      setLoadingWaiting(false);
+    }
+  };
 
   const approve = async () => {
     if (!pairingCode.trim()) return;
@@ -43,6 +62,7 @@ function PairingSection({ gatewayId, channelId, orgFetch }: { gatewayId: string;
       });
       toast('Pairing approved!', 'success');
       setPairingCode('');
+      setWaiting(null);
     } catch (err: any) {
       toast(err.message, 'error');
     } finally {
@@ -92,6 +112,21 @@ function PairingSection({ gatewayId, channelId, orgFetch }: { gatewayId: string;
             {approving ? 'Approving...' : 'Approve'}
           </button>
         </div>
+        {showWaiting && (
+          <div className="mt-2">
+            <button
+              onClick={loadWaiting}
+              disabled={loadingWaiting}
+              className="text-[11px] font-medium disabled:opacity-50"
+              style={{ color: 'var(--accent)' }}
+            >
+              {loadingWaiting ? 'Checking...' : waiting === null ? 'See who is waiting' : 'Check again'}
+            </button>
+            {waiting !== null && (
+              <pre className="text-[11px] mt-1 whitespace-pre-wrap" style={{ color: 'var(--text-tertiary)' }}>{waiting}</pre>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -206,7 +241,7 @@ export default function ChannelsPage() {
               style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
             >
               {gateways.map((g) => (
-                <option key={g.id} value={g.id}>{gatewayLabel(g)}</option>
+                <option key={g.id} value={g.id}>{gatewayLabel(g)}{g.runtime === 'hermes' ? ' · Hermes' : ''}</option>
               ))}
             </select>
           </div>
@@ -319,7 +354,12 @@ export default function ChannelsPage() {
 
                   {/* Pairing section — always visible when configured */}
                   {config?.configured && !isEditing && (
-                    <PairingSection gatewayId={selectedId} channelId={ch.id} orgFetch={orgFetch} />
+                    <PairingSection
+                      gatewayId={selectedId}
+                      channelId={ch.id}
+                      orgFetch={orgFetch}
+                      showWaiting={gateways.find((g) => g.id === selectedId)?.runtime === 'hermes'}
+                    />
                   )}
 
                   {/* Edit token area — only when editing */}

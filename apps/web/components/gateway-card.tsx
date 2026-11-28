@@ -2,11 +2,12 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { PROVIDERS, providerForModel, type Gateway } from '@clawhuddle/shared';
-import { gatewayUrl, gatewayLabel } from '@/lib/gateway-url';
+import { PROVIDERS, RUNTIME_FEATURES, providerForModel, runtimeLabel, type Gateway } from '@clawhuddle/shared';
+import { gatewayUrl, gatewayLabel, gatewayLogin } from '@/lib/gateway-url';
 import { useToast } from '@/components/ui/toast';
 import { useConfirm } from '@/components/ui/confirm-dialog';
 import { GoogleConnect } from '@/components/google-connect';
+import { GatewayLogin } from '@/components/gateway-login';
 
 type OrgFetch = <T>(path: string, options?: RequestInit) => Promise<T>;
 
@@ -32,6 +33,10 @@ export function GatewayCard({ gateway, orgFetch, onChanged, activeProviders }: P
   const [editingLabel, setEditingLabel] = useState(false);
   const [labelInput, setLabelInput] = useState(gateway.label ?? '');
 
+  const runtime = gateway.runtime ?? 'openclaw';
+  const features = RUNTIME_FEATURES[runtime];
+  const isHermes = runtime === 'hermes';
+  const login = gatewayLogin(gateway);
   const status = gateway.status || 'not deployed';
   const color =
     status === 'running' ? 'var(--green)' :
@@ -98,7 +103,7 @@ export function GatewayCard({ gateway, orgFetch, onChanged, activeProviders }: P
     await act('Model', () =>
       orgFetch(`/gateways/${gateway.id}`, { method: 'PATCH', body: JSON.stringify({ primary_model: value || null }) }),
     );
-    toast('Model updated. Restart this instance for the change to take effect.', 'success');
+    toast(isHermes ? 'Model updated. New chats on this instance use it.' : 'Model updated. Restart this instance for the change to take effect.', 'success');
   };
 
   const pinnedProvider = gateway.primary_model ? providerForModel(gateway.primary_model)?.id ?? '' : '';
@@ -152,14 +157,24 @@ export function GatewayCard({ gateway, orgFetch, onChanged, activeProviders }: P
             style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
           />
         ) : (
-          <button
-            onClick={() => { setLabelInput(gateway.label ?? ''); setEditingLabel(true); }}
-            className="min-w-0 truncate text-sm font-semibold text-left hover:underline"
-            style={{ color: 'var(--text-primary)' }}
-            title="Rename"
-          >
-            {gatewayLabel(gateway)}
-          </button>
+          <div className="flex min-w-0 items-center gap-2">
+            <button
+              onClick={() => { setLabelInput(gateway.label ?? ''); setEditingLabel(true); }}
+              className="min-w-0 truncate text-sm font-semibold text-left hover:underline"
+              style={{ color: 'var(--text-primary)' }}
+              title="Rename"
+            >
+              {gatewayLabel(gateway)}
+            </button>
+            {isHermes && (
+              <span
+                className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium"
+                style={{ background: 'var(--accent-muted)', color: 'var(--accent)' }}
+              >
+                {runtimeLabel(runtime)}
+              </span>
+            )}
+          </div>
         )}
         <div className="flex items-center gap-2 shrink-0">
           <span className="w-2 h-2 rounded-full" style={{ background: color }} />
@@ -173,20 +188,35 @@ export function GatewayCard({ gateway, orgFetch, onChanged, activeProviders }: P
         <>
           {/* Phones: Open on its own row, the other three underneath. */}
           <div className="grid grid-cols-3 gap-2 sm:flex">
-            {primaryBtn('Open', open, false, 'col-span-3')}
+            {primaryBtn(features.tokenLink ? 'Open' : 'Open dashboard', open, false, 'col-span-3')}
             {quietBtn('Restart', restart)}
             {quietBtn('Redeploy', redeploy)}
             {quietBtn('Stop', stop, true)}
           </div>
-          <p className="text-[11px] mt-2" style={{ color: 'var(--text-tertiary)' }}>
-            First time from this browser? Let it in under{' '}
-            <Link href="/devices" style={{ color: 'var(--accent)' }}>Device Requests</Link>.
-          </p>
-          <p className="text-[11px] mt-1" style={{ color: 'var(--text-tertiary)' }}>
-            <span style={{ color: 'var(--text-secondary)' }}>Restart</span> reboots the instance as it is.{' '}
-            <span style={{ color: 'var(--text-secondary)' }}>Redeploy</span> rebuilds it from the current config — use it after changing skills, API keys, channels or the model. Both take a few minutes.
-          </p>
-          <GoogleConnect gatewayId={gateway.id} orgFetch={orgFetch} />
+          {features.devices ? (
+            <>
+              <p className="text-[11px] mt-2" style={{ color: 'var(--text-tertiary)' }}>
+                First time from this browser? Let it in under{' '}
+                <Link href="/devices" style={{ color: 'var(--accent)' }}>Device Requests</Link>.
+              </p>
+              <p className="text-[11px] mt-1" style={{ color: 'var(--text-tertiary)' }}>
+                <span style={{ color: 'var(--text-secondary)' }}>Restart</span> reboots the instance as it is.{' '}
+                <span style={{ color: 'var(--text-secondary)' }}>Redeploy</span> rebuilds it from the current config — use it after changing skills, API keys, channels or the model. Both take a few minutes.
+              </p>
+            </>
+          ) : (
+            <>
+              {login && <GatewayLogin username={login.username} password={login.password} />}
+              <p className="text-[11px] mt-2" style={{ color: 'var(--text-tertiary)' }}>
+                Open dashboard signs you in. If the dashboard ever asks, this is the sign-in; it is for this instance only, keep it to yourself.
+              </p>
+              <p className="text-[11px] mt-1" style={{ color: 'var(--text-tertiary)' }}>
+                API keys and the model reach this instance on their own.{' '}
+                <span style={{ color: 'var(--text-secondary)' }}>Redeploy</span> after changing skills or chat channels; it takes about a minute.
+              </p>
+            </>
+          )}
+          <GoogleConnect gatewayId={gateway.id} orgFetch={orgFetch} singleAccount={!features.multiGoogleAccounts} />
         </>
       ) : status === 'deploying' || status === 'provisioning' ? (
         <div className="flex items-center justify-between gap-3 py-2">
@@ -226,7 +256,8 @@ export function GatewayCard({ gateway, orgFetch, onChanged, activeProviders }: P
                 {gateway.primary_model.replace(/^tokenkiosk\//, '')}{hasKey ? '' : ' (no key)'}
               </option>
             )}
-            {PROVIDERS.filter((p) => p.models?.length && activeProviders.includes(p.id)).map((p) => (
+            {/* A Hermes instance can only use providers Hermes itself speaks to. */}
+            {PROVIDERS.filter((p) => p.models?.length && activeProviders.includes(p.id) && (!isHermes || p.hermes?.provider)).map((p) => (
               <optgroup key={p.id} label={p.label}>
                 {p.models!.map((m) => (
                   <option key={m.id} value={m.id}>{m.label}</option>

@@ -13,6 +13,7 @@ import { orgUserSkillRoutes } from './routes/org/user-skills.js';
 import { orgChatRoutes } from './routes/org/chat.js';
 import { orgPortForwardRoutes } from './routes/org/port-forwards.js';
 import { superAdminRoutes } from './routes/super-admin.js';
+import { dashboardOpenRoutes } from './routes/dashboard-open.js';
 import { syncAllPortForwards } from './services/port-forward.js';
 import { startUsageSnapshotScheduler } from './services/usage.js';
 
@@ -28,6 +29,7 @@ await app.register(cors, {
 
 // Public / auth routes (no org context needed)
 await app.register(authRoutes);
+await app.register(dashboardOpenRoutes);
 
 // Authed routes (authPlugin only, no org context)
 await app.register(orgRoutes);

@@ -13,6 +13,8 @@ import { USAGE_SCOPES, type GatewayUsage, type UsageScope, type UsageSnapshot, t
 import { getDb } from "../db/index.js";
 import { execInContainer } from "./gateway.js";
 import { containerNameFor, listOrgGateways, type GatewayRow } from "./gateway-store.js";
+import { fetchHermesUsage } from "./hermes.js";
+import { platformProviderName } from "./hermes-config.js";
 
 const FRESH_TTL_MS = 5 * 60_000;
 const MAX_CONCURRENT = 3;
@@ -125,6 +127,38 @@ export function condenseSessionsUsage(
   };
 }
 
+/**
+ * A Hermes instance's usage (aggregates the image's helper reads from the
+ * sessions database, see docker/hermes/helper.py) as the same `GatewayUsage`.
+ * Hermes accounts per session, so a session counts on the day it started, and
+ * the answer is always complete: there is no transcript index to warm up.
+ */
+export function condenseHermesUsage(
+  gatewayId: string,
+  raw: any,
+  window: { startDate: string; endDate: string },
+): GatewayUsage {
+  return condenseSessionsUsage(
+    gatewayId,
+    {
+      totals: raw?.totals,
+      aggregates: {
+        byModel: arr(raw?.byModel).map((m) => ({
+          provider: platformProviderName(String(m?.provider ?? ""), typeof m?.baseUrl === "string" ? m.baseUrl : undefined),
+          model: m?.model,
+          count: m?.calls,
+          totals: m?.totals,
+        })),
+        byChannel: arr(raw?.byChannel).map((c) => ({ channel: c?.channel, totals: { totalTokens: c?.tokens, totalCost: c?.cost } })),
+        daily: raw?.daily,
+        sessionCount: raw?.sessions,
+        messages: raw?.messages,
+      },
+    },
+    window,
+  );
+}
+
 /** Parse CLI stdout, tolerating anything printed before the JSON object. */
 export function parseCliJson(stdout: string): any {
   const start = stdout.indexOf("{");
@@ -136,6 +170,9 @@ type UsageDates = { startDate: string; endDate: string };
 
 /** One `sessions.usage` run. With a time zone, days (and the window) are that zone's calendar days, not UTC's. */
 async function fetchUsageWindow(g: GatewayRow, window: UsageDates, timeZone?: string): Promise<GatewayUsage> {
+  if (g.runtime === "hermes") {
+    return condenseHermesUsage(g.id, await withSlot(() => fetchHermesUsage(g, window, timeZone)), window);
+  }
   const params = JSON.stringify({
     ...window,
     ...(timeZone ? { mode: "specific", timeZone } : {}),

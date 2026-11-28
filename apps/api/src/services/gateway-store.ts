@@ -3,7 +3,7 @@ import path from "node:path";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/index.js";
 import { DEFAULT_MAX_GATEWAYS_PER_USER } from "@clawhuddle/shared";
-import type { GatewayStatus } from "@clawhuddle/shared";
+import type { GatewayRuntime, GatewayStatus } from "@clawhuddle/shared";
 import type { ChannelTokens } from "./openclaw-config.js";
 
 /**
@@ -33,6 +33,8 @@ export interface GatewayRow {
   primary_provider: string | null;
   primary_model: string | null;
   slack_access_migrated_at: string | null;
+  /** Agent software in the container; decides which service module handles the instance. */
+  runtime: GatewayRuntime;
   created_at: string;
   // joined from org_members
   user_id: string;
@@ -156,6 +158,14 @@ export function effectiveGatewayLimit(orgId: string, memberId: string): { limit:
   return row;
 }
 
+/** The org's Hermes switch (Admin → API Keys): may members create Hermes instances? */
+export function orgAllowsHermes(orgId: string): boolean {
+  const row = getDb().prepare("SELECT hermes_enabled FROM organizations WHERE id = ?").get(orgId) as
+    | { hermes_enabled: number }
+    | undefined;
+  return !!row?.hermes_enabled;
+}
+
 export function assertCanCreateGateway(orgId: string, memberId: string): void {
   const { limit, current } = effectiveGatewayLimit(orgId, memberId);
   if (current >= limit) throw new GatewayLimitError(limit, current);
@@ -180,7 +190,11 @@ function mirrorSlot1(memberId: string): void {
  * and insert share one synchronous transaction, so two requests racing for the
  * last slot cannot both win.
  */
-export function createGatewayRow(orgId: string, memberId: string, opts: { label?: string | null } = {}): GatewayRow {
+export function createGatewayRow(
+  orgId: string,
+  memberId: string,
+  opts: { label?: string | null; runtime?: GatewayRuntime } = {},
+): GatewayRow {
   const db = getDb();
   const insert = db.transaction(() => {
     assertCanCreateGateway(orgId, memberId);
@@ -192,11 +206,12 @@ export function createGatewayRow(orgId: string, memberId: string, opts: { label?
 
     const id = uuid();
     db.prepare(
-      `INSERT INTO gateways (id, org_id, member_id, slot, label, status, port, token, subdomain)
-       VALUES (?, ?, ?, ?, ?, 'provisioning', ?, ?, ?)`,
+      `INSERT INTO gateways (id, org_id, member_id, slot, label, status, port, token, subdomain, runtime)
+       VALUES (?, ?, ?, ?, ?, 'provisioning', ?, ?, ?, ?)`,
     ).run(
       id, orgId, memberId, slot, opts.label ?? null,
       GATEWAY_INTERNAL_PORT, crypto.randomBytes(24).toString("hex"), generateSubdomain(),
+      opts.runtime ?? "openclaw",
     );
     // A fresh config already has the locked-down Slack defaults, so there is nothing to migrate.
     markSlackAccessMigrated(id);

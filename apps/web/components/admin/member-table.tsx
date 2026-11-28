@@ -7,8 +7,9 @@ import { createOrgFetch } from '@/lib/api';
 import { useToast } from '@/components/ui/toast';
 import { useConfirm } from '@/components/ui/confirm-dialog';
 import { MemberApiKeysModal } from './member-api-keys-modal';
-import { gatewayUrl, gatewayLabel, type GatewayAccess } from '@/lib/gateway-url';
-import type { GatewaySummary, OrgMember } from '@clawhuddle/shared';
+import { gatewayUrl, gatewayLabel, gatewayLogin, type GatewayAccess } from '@/lib/gateway-url';
+import { GatewayLogin } from '@/components/gateway-login';
+import { runtimeLabel, type GatewayRuntime, type GatewaySummary, type OrgMember } from '@clawhuddle/shared';
 
 function Badge({ color, children }: { color: 'green' | 'red' | 'yellow' | 'blue' | 'purple' | 'gray'; children: React.ReactNode }) {
   const styles: Record<string, { bg: string; text: string }> = {
@@ -56,10 +57,13 @@ interface Props {
 
 export function MemberTable({ initialMembers }: Props) {
   const { data: session } = useSession();
-  const { currentOrgId, memberRole } = useOrg();
+  const { currentOrg, currentOrgId, memberRole } = useOrg();
   const { toast } = useToast();
   const { confirm } = useConfirm();
   const userId = session?.user?.id;
+  const hermesEnabled = !!currentOrg?.hermes_enabled;
+  // Sign-in of a Hermes instance someone just opened from this page (its dashboard asks for it).
+  const [openedLogin, setOpenedLogin] = useState<{ title: string; username: string; password: string } | null>(null);
   // Maintainers only manage plain members' instances: no invites, roles,
   // suspensions, limits or keys. The API enforces it; this hides the controls.
   const isMaintainer = memberRole === 'maintainer';
@@ -177,11 +181,11 @@ export function MemberTable({ initialMembers }: Props) {
     await refresh();
   };
 
-  const deployNew = async (member: OrgMember) => {
+  const deployNew = async (member: OrgMember, runtime: GatewayRuntime = 'openclaw') => {
     setLoadingGateway(member.id);
     setGatewayLimitHit(null);
     try {
-      await orgFetch(`/gateways/members/${member.id}`, { method: 'POST', body: JSON.stringify({}) });
+      await orgFetch(`/gateways/members/${member.id}`, { method: 'POST', body: JSON.stringify({ runtime }) });
       await refresh();
     } catch (err: any) {
       if (err.code === 'gateway_limit') {
@@ -285,6 +289,13 @@ export function MemberTable({ initialMembers }: Props) {
       } else {
         win.close();
       }
+      // A Hermes dashboard has a sign-in page: the link signs in on its own,
+      // and the login is shown as well in case the new tab still asks for it.
+      const login = gatewayLogin(access);
+      const owner = members.find((m) => m.id === gateway.member_id);
+      setOpenedLogin(url && login
+        ? { title: `${owner?.name || owner?.email || 'Member'} · ${gatewayLabel(gateway)}`, ...login }
+        : null);
     } catch (err: any) {
       win.close();
       toast(err.message, 'error');
@@ -357,6 +368,7 @@ export function MemberTable({ initialMembers }: Props) {
             <span className="text-xs font-medium min-w-20" style={{ color: 'var(--text-primary)' }} title={`slot ${g.slot}`}>
               {gatewayLabel(g)}
             </span>
+            {g.runtime === 'hermes' && <Badge color="purple">{runtimeLabel(g.runtime)}</Badge>}
             {gatewayStatusBadge(g)}
             {g.container_id && (
               <button
@@ -385,6 +397,9 @@ export function MemberTable({ initialMembers }: Props) {
         ) : (
           <span className="flex items-center gap-2">
             <ActionBtn onClick={() => deployNew(member)}>{list.length === 0 ? 'Deploy' : '+ New instance'}</ActionBtn>
+            {hermesEnabled && (
+              <ActionBtn onClick={() => deployNew(member, 'hermes')}>{list.length === 0 ? 'Deploy Hermes' : '+ Hermes'}</ActionBtn>
+            )}
             {list.length > 0 && (
               <span className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>{list.length}/{max}</span>
             )}
@@ -489,6 +504,30 @@ export function MemberTable({ initialMembers }: Props) {
           >
             &times;
           </button>
+        </div>
+      )}
+
+      {openedLogin && (
+        <div
+          className="mb-4 px-4 py-3 rounded-lg text-sm max-w-lg"
+          style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)' }}
+        >
+          <div className="flex items-center gap-3">
+            <span className="min-w-0 truncate" style={{ color: 'var(--text-primary)' }}>
+              Sign-in for {openedLogin.title}
+            </span>
+            <button
+              onClick={() => setOpenedLogin(null)}
+              className="shrink-0 text-xs px-1 ml-auto"
+              style={{ color: 'var(--text-tertiary)' }}
+            >
+              &times;
+            </button>
+          </div>
+          <GatewayLogin username={openedLogin.username} password={openedLogin.password} />
+          <p className="text-[11px] mt-2" style={{ color: 'var(--text-tertiary)' }}>
+            The new tab signs in by itself; this is only for when it asks. Opening a member’s instance is logged.
+          </p>
         </div>
       )}
 

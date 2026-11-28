@@ -20,6 +20,7 @@ export default function ApiKeysPage() {
   const [loading, setLoading] = useState(true);
   const [savingPrimary, setSavingPrimary] = useState(false);
   const [savingMax, setSavingMax] = useState(false);
+  const [savingRuntime, setSavingRuntime] = useState(false);
   const { secretStatus, reloadSecretStatus } = useSecretStatus(orgFetch, '/api-keys/secret-status');
 
   useEffect(() => {
@@ -76,6 +77,21 @@ export default function ApiKeysPage() {
       toast(err.message || 'Failed to update instance limit', 'error');
     } finally {
       setSavingMax(false);
+    }
+  };
+
+  // Off only stops new Hermes instances; existing ones keep running.
+  const setHermesEnabled = async (on: boolean) => {
+    if (!currentOrgId || !userId) return;
+    setSavingRuntime(true);
+    try {
+      await apiFetch(`/api/orgs/${currentOrgId}`, { method: 'PATCH', body: JSON.stringify({ hermes_enabled: on }) });
+      await refreshOrgs();
+      toast(on ? 'Members can now create Hermes instances' : 'New Hermes instances are off. Existing ones keep running.', 'success');
+    } catch (err: any) {
+      toast(err.message || 'Failed to update agent runtimes', 'error');
+    } finally {
+      setSavingRuntime(false);
     }
   };
 
@@ -198,6 +214,35 @@ export default function ApiKeysPage() {
             border: '1px solid var(--border-subtle)',
           }}
         />
+      </div>
+
+      <div
+        className="rounded-xl p-5 mb-6 max-w-lg"
+        style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)' }}
+      >
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 mb-1">
+          <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+            Agent runtimes
+          </h3>
+          <span className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
+            Chosen per instance when it is created
+          </span>
+        </div>
+        <p className="text-xs mb-3" style={{ color: 'var(--text-tertiary)' }}>
+          Every instance runs OpenClaw unless Hermes Agent is turned on here. Then members pick
+          one of the two under “New instance”; the instance limit covers both. On Hermes, API keys
+          are plain environment variables the agent can read (no secret store), and keys with a
+          sign-in instead of a key (Codex, Claude OAuth) are not available.
+        </p>
+        <label className="flex items-center gap-2 text-sm" style={{ color: 'var(--text-primary)' }}>
+          <input
+            type="checkbox"
+            checked={!!currentOrg?.hermes_enabled}
+            disabled={savingRuntime}
+            onChange={(e) => setHermesEnabled(e.target.checked)}
+          />
+          Allow Hermes Agent instances
+        </label>
       </div>
 
       <ApiKeyForm initialKeys={keys} fetchFn={orgFetch!} scope="org" secretStatus={secretStatus} onMutate={reloadSecretStatus} />

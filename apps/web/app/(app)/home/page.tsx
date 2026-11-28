@@ -7,7 +7,7 @@ import { useOrg } from '@/lib/org-context';
 import { useOrgFetch } from '@/lib/use-org-fetch';
 import { apiFetch } from '@/lib/api';
 import { GatewayCard } from '@/components/gateway-card';
-import type { Gateway, OrgMember, Skill } from '@clawhuddle/shared';
+import { RUNTIMES, type Gateway, type GatewayRuntime, type OrgMember, type Skill } from '@clawhuddle/shared';
 
 interface SkillWithStatus extends Skill {
   assigned: boolean;
@@ -150,7 +150,10 @@ function CreateOrgView({ onCreated }: { onCreated: () => Promise<void> }) {
 
 function DashboardView() {
   const { orgFetch, ready } = useOrgFetch();
-  const { memberRole } = useOrg();
+  const { memberRole, currentOrg } = useOrg();
+  // With the org's Hermes switch on, a new instance is OpenClaw or Hermes; otherwise always OpenClaw.
+  const runtimeChoice = !!currentOrg?.hermes_enabled;
+  const [runtime, setRuntime] = useState<GatewayRuntime>('openclaw');
   const isAdmin = memberRole === 'admin' || memberRole === 'owner';
 
   const [gateways, setGateways] = useState<Gateway[]>([]);
@@ -201,13 +204,19 @@ function DashboardView() {
     setCreating(true);
     setCreateError('');
     try {
-      await orgFetch('/me/gateways', { method: 'POST', body: JSON.stringify({}) });
+      await orgFetch('/me/gateways', {
+        method: 'POST',
+        body: JSON.stringify({ runtime: runtimeChoice ? runtime : 'openclaw' }),
+      });
+      setRuntime('openclaw');
       await fetchData();
     } catch (err: any) {
       setCreateError(
         err.code === 'gateway_limit'
           ? `Instance limit reached (${err.data?.current}/${err.data?.limit}). Ask an admin to raise it.`
-          : err.message || 'Deploy failed',
+          : err.code === 'runtime_disabled'
+            ? 'Hermes instances were just turned off for this organization. Reload the page.'
+            : err.message || 'Deploy failed',
       );
     } finally {
       setCreating(false);
@@ -252,6 +261,30 @@ function DashboardView() {
             <p className="text-xs mb-2" style={{ color: 'var(--text-tertiary)' }}>
               Your assistant is not yet deployed.
             </p>
+          )}
+          {runtimeChoice && !atLimit && (
+            <div className="grid sm:grid-cols-2 gap-2 mb-3" role="radiogroup" aria-label="Agent runtime">
+              {RUNTIMES.map((r) => {
+                const picked = runtime === r.id;
+                return (
+                  <button
+                    key={r.id}
+                    role="radio"
+                    aria-checked={picked}
+                    onClick={() => setRuntime(r.id)}
+                    disabled={creating}
+                    className="rounded-lg px-3 py-2 text-left transition-colors disabled:opacity-50"
+                    style={{
+                      background: picked ? 'var(--accent-muted)' : 'var(--bg-secondary)',
+                      border: `1px solid ${picked ? 'var(--accent)' : 'var(--border-primary)'}`,
+                    }}
+                  >
+                    <span className="block text-sm font-medium" style={{ color: 'var(--text-primary)' }}>{r.label}</span>
+                    <span className="block text-[11px] mt-0.5" style={{ color: 'var(--text-tertiary)' }}>{r.description}</span>
+                  </button>
+                );
+              })}
+            </div>
           )}
           <button
             onClick={createInstance}

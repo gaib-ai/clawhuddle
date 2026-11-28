@@ -329,6 +329,60 @@ export function heartbeatConfigRetired(config: Record<string, unknown>): boolean
   return minor > 11 || (minor === 11 && patch >= 5);
 }
 
+/**
+ * The model an instance starts on when nothing is pinned: google/gemini-3.8-flash
+ * (Gemini 4 Argon until 2026-10-28; Gemini 4 Hydrogen for a few hours on
+ * 2026-11-27) — NOT the first active provider — so instances behave
+ * consistently no matter which keys happen to exist.
+ */
+export const DEFAULT_PRIMARY = 'google/gemini-3.8-flash';
+
+type Provider = (typeof PROVIDERS)[number];
+
+/**
+ * Default model selection, shared by both runtimes' config generators:
+ *  - A pinned model names its provider through the catalog; it only counts
+ *    when that provider is active for this member.
+ *  - Else a pinned provider (Admin → API Keys, My API Keys, or an older
+ *    instance pin) the member has a key for: that provider's model, honoring
+ *    the per-key model override.
+ *  - Else DEFAULT_PRIMARY.
+ * The other active providers' models are the fallbacks.
+ */
+export function resolvePrimaryModel(options: {
+  activeProviderIds?: string[];
+  modelOverrides?: Record<string, string>;
+  primaryProviderId?: string;
+  primaryModel?: string;
+}): {
+  primary: string;
+  /** The provider the pin resolved to; undefined when the primary is DEFAULT_PRIMARY by default. */
+  pinned: Provider | undefined;
+  fallbacks: string[];
+  activeProviders: Provider[];
+  resolveModel: (p: Provider) => string;
+} {
+  const overrides = options.modelOverrides ?? {};
+  const resolveModel = (p: Provider) => overrides[p.id] || p.defaultModel;
+
+  const activeProviders = (options.activeProviderIds ?? [])
+    .map((id) => PROVIDERS.find((p) => p.id === id))
+    .filter((p) => p && (p.kind ?? 'model') === 'model') as Provider[];
+
+  const modelProvider = options.primaryModel ? providerForModel(options.primaryModel) : undefined;
+  const pinnedByModel = modelProvider && activeProviders.includes(modelProvider) ? modelProvider : undefined;
+  const pinned = pinnedByModel
+    ?? (options.primaryProviderId ? activeProviders.find((p) => p.id === options.primaryProviderId) : undefined);
+
+  const primary = pinnedByModel ? options.primaryModel! : pinned ? resolveModel(pinned) : DEFAULT_PRIMARY;
+  const fallbacks = activeProviders
+    .filter((p) => p !== pinned)
+    .map(resolveModel)
+    .filter((m) => m !== primary);
+
+  return { primary, pinned, fallbacks, activeProviders, resolveModel };
+}
+
 export function generateOpenClawConfig(options: {
   port: number;
   token: string;
@@ -508,34 +562,7 @@ export function generateOpenClawConfig(options: {
     config.models = { providers: customProviders };
   }
 
-  // Default model selection:
-  //  - If the org pinned a primary provider (Admin → API Keys) AND the member
-  //    has a key for it, that provider's model (honoring the per-provider
-  //    model override) becomes primary; other active providers are fallbacks.
-  //  - Otherwise the primary defaults to google/gemini-3.8-flash (Gemini 4
-  //    Argon until 2026-10-28; Gemini 4 Hydrogen for a few hours on
-  //    2026-11-27) — NOT the first active provider — so gateways behave
-  //    consistently no matter which keys happen to exist.
-  const DEFAULT_PRIMARY = 'google/gemini-3.8-flash';
-  const overrides = options.modelOverrides ?? {};
-  const resolveModel = (p: (typeof PROVIDERS)[number]) => overrides[p.id] || p.defaultModel;
-
-  const activeProviders = (options.activeProviderIds ?? [])
-    .map((id) => PROVIDERS.find((p) => p.id === id))
-    .filter((p) => p && (p.kind ?? 'model') === 'model') as typeof PROVIDERS;
-
-  // A pinned model names its provider through the catalog; it only counts when
-  // that provider is active for this member, else fall through to the provider pin.
-  const modelProvider = options.primaryModel ? providerForModel(options.primaryModel) : undefined;
-  const pinnedByModel = modelProvider && activeProviders.includes(modelProvider) ? modelProvider : undefined;
-  const pinned = pinnedByModel
-    ?? (options.primaryProviderId ? activeProviders.find((p) => p.id === options.primaryProviderId) : undefined);
-
-  const primary = pinnedByModel ? options.primaryModel! : pinned ? resolveModel(pinned) : DEFAULT_PRIMARY;
-  const fallbacks = activeProviders
-    .filter((p) => p !== pinned)
-    .map(resolveModel)
-    .filter((m) => m !== primary);
+  const { primary, pinned, fallbacks, activeProviders, resolveModel } = resolvePrimaryModel(options);
 
   // A provider whose models come from an agent runtime must say so here.
   // Enabling its plugin takes those models out of the built-in catalog, and

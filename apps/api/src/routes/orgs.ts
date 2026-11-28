@@ -20,6 +20,11 @@ export function purgeOrgFromDb(db: any, orgId: string) {
   db.prepare('DELETE FROM organizations WHERE id = ?').run(orgId);
 }
 
+/** An organization row as the API returns it: SQLite keeps the switch as 0/1. */
+function orgRow<T extends { hermes_enabled?: unknown } | undefined>(row: T): T {
+  return row ? { ...row, hermes_enabled: !!row.hermes_enabled } : row;
+}
+
 function slugify(name: string): string {
   return name
     .toLowerCase()
@@ -41,9 +46,9 @@ export async function orgRoutes(app: FastifyInstance) {
        JOIN org_members om ON om.org_id = o.id
        WHERE om.user_id = ? AND om.status = 'active'
        ORDER BY o.name`
-    ).all(request.currentUser!.id);
+    ).all(request.currentUser!.id) as { hermes_enabled?: unknown }[];
 
-    return { data: orgs };
+    return { data: orgs.map(orgRow) };
   });
 
   // Create organization
@@ -69,11 +74,12 @@ export async function orgRoutes(app: FastifyInstance) {
       "INSERT INTO org_members (id, org_id, user_id, role) VALUES (?, ?, ?, 'owner')"
     ).run(memberId, orgId, request.currentUser!.id);
 
-    const org = db.prepare('SELECT * FROM organizations WHERE id = ?').get(orgId);
-    return reply.status(201).send({ data: org });
+    const org = db.prepare('SELECT * FROM organizations WHERE id = ?').get(orgId) as { hermes_enabled?: unknown };
+    return reply.status(201).send({ data: orgRow(org) });
   });
 
-  // Update organization settings (admin/owner only): primary_provider, max_gateways_per_user.
+  // Update organization settings (admin/owner only): primary_provider, primary_model,
+  // max_gateways_per_user, hermes_enabled.
   app.patch<{ Params: { orgId: string }; Body: UpdateOrgRequest }>(
     '/api/orgs/:orgId',
     async (request, reply) => {
@@ -132,6 +138,16 @@ export async function orgRoutes(app: FastifyInstance) {
         params.push(request.body.max_gateways_per_user ?? null);
       }
 
+      // Whether members may pick Hermes for a new instance. Turning it off only
+      // stops new ones: existing Hermes instances keep running and redeploying.
+      if ('hermes_enabled' in request.body) {
+        if (typeof request.body.hermes_enabled !== 'boolean') {
+          return reply.status(400).send({ error: 'validation', message: 'hermes_enabled must be true or false' });
+        }
+        updates.push('hermes_enabled = ?');
+        params.push(request.body.hermes_enabled ? 1 : 0);
+      }
+
       if (updates.length === 0) {
         return reply.status(400).send({ error: 'validation', message: 'No updatable fields provided' });
       }
@@ -144,8 +160,8 @@ export async function orgRoutes(app: FastifyInstance) {
       // member's openclaw.json. auth-profiles.json hot-reload won't pick it up.
       if ('primary_provider' in request.body || 'primary_model' in request.body) syncAuthProfiles(orgId);
 
-      const org = db.prepare('SELECT * FROM organizations WHERE id = ?').get(orgId);
-      return { data: org };
+      const org = db.prepare('SELECT * FROM organizations WHERE id = ?').get(orgId) as { hermes_enabled?: unknown };
+      return { data: orgRow(org) };
     },
   );
 

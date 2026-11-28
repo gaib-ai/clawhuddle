@@ -366,6 +366,7 @@ export default function UsagePage() {
                               <p className="truncate" style={{ color: 'var(--text-primary)' }}>{who(g)}</p>
                               <p className="truncate text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
                                 {gatewayLabel(g)}
+                                {g.runtime === 'hermes' && ' · Hermes'}
                                 {note && ` · ${note}`}
                               </p>
                             </div>
@@ -419,8 +420,9 @@ export default function UsagePage() {
       )}
 
       <p className="text-[11px] mt-4 leading-relaxed" style={{ color: 'var(--text-tertiary)' }}>
-        Cost is OpenClaw&apos;s estimate at each model&apos;s list price, not a bill: Token Kiosk and Claw Proxy charge
+        Cost is the assistant&apos;s own estimate at each model&apos;s list price, not a bill: Token Kiosk and Claw Proxy charge
         differently, and calls to a model with no listed price count as $0. Days run midnight to midnight UTC+8.
+        A Hermes instance counts a whole chat on the day it started.
       </p>
     </div>
   );

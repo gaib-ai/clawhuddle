@@ -65,8 +65,34 @@ export function scanRepoForSkills(gitUrl: string): { name: string; git_path: str
   return results;
 }
 
-export async function installSkillsForUser(userId: string, skills: Skill[]): Promise<void> {
-  const skillsDir = path.join(getDataDir(), 'gateways', userId, 'skills');
+/** Hands a copied skill tree to the account the instance runs as. Not being root is tolerated (tests). */
+function chownTree(target: string, uid: number): void {
+  try {
+    fs.chownSync(target, uid, uid);
+  } catch (err: any) {
+    if (err?.code !== 'EPERM') throw err;
+    return;
+  }
+  if (!fs.lstatSync(target).isDirectory()) return;
+  for (const entry of fs.readdirSync(target)) chownTree(path.join(target, entry), uid);
+}
+
+/**
+ * Copies the given skills into an instance's skills directory and returns the
+ * directory names it installed. `relDir` is the instance's data dir relative
+ * to `gateways/` (`<orgId>/<userId>[-slot]`).
+ *
+ * `subdir` installs into `skills/<subdir>/` instead (Hermes keeps platform
+ * skills in a category of their own); `uid` makes that account the owner of
+ * what was copied (Hermes does not run as root).
+ */
+export async function installSkillsForUser(
+  relDir: string,
+  skills: Skill[],
+  opts: { subdir?: string; uid?: number } = {},
+): Promise<string[]> {
+  const skillsDir = path.join(getDataDir(), 'gateways', relDir, 'skills', opts.subdir ?? '');
+  const installed: string[] = [];
 
   fs.mkdirSync(skillsDir, { recursive: true });
 
@@ -96,5 +122,8 @@ export async function installSkillsForUser(userId: string, skills: Skill[]): Pro
       fs.rmSync(destDir, { recursive: true });
     }
     fs.cpSync(srcDir, destDir, { recursive: true });
+    if (opts.uid !== undefined) chownTree(destDir, opts.uid);
+    installed.push(skillName);
   }
+  return installed;
 }

@@ -14,12 +14,14 @@ interface GoogleInfo {
 }
 
 /**
- * Google sign-in for the instance's gog CLI (Gmail, Calendar, Drive …). gog's
- * client is a Desktop OAuth client, so Google can only send the browser back to
- * a loopback address that does not load; the member copies that address here
- * and the API finishes the sign-in inside the instance.
+ * Google sign-in for the instance (Gmail, Calendar, Drive …): gog on OpenClaw,
+ * the google-workspace skill on Hermes. The client is a Desktop OAuth client,
+ * so Google can only send the browser back to a loopback address that does not
+ * load; the member copies that address here and the API finishes the sign-in
+ * inside the instance. `singleAccount`: the instance holds one Google account
+ * (Hermes), so connecting again replaces it.
  */
-export function GoogleConnect({ gatewayId, orgFetch }: { gatewayId: string; orgFetch: OrgFetch }) {
+export function GoogleConnect({ gatewayId, orgFetch, singleAccount = false }: { gatewayId: string; orgFetch: OrgFetch; singleAccount?: boolean }) {
   const { data: session } = useSession();
   const { toast } = useToast();
   const { confirm } = useConfirm();
@@ -145,7 +147,10 @@ export function GoogleConnect({ gatewayId, orgFetch }: { gatewayId: string; orgF
     <div className="mt-4 pt-3" style={{ borderTop: '1px solid var(--border-subtle)' }}>
       <div className="flex items-center justify-between gap-3">
         <span className="text-xs" style={muted}>Google account</span>
-        {info.readiness === 'ready' && step === 'idle' && smallBtn(info.accounts.length ? 'Connect another' : 'Connect Google', begin, false, !info.accounts.length)}
+        {info.readiness === 'ready' && step === 'idle' && smallBtn(
+          !info.accounts.length ? 'Connect Google' : singleAccount ? 'Replace account' : 'Connect another',
+          begin, false, !info.accounts.length,
+        )}
       </div>
 
       {info.readiness === 'restart' && (
@@ -210,7 +215,7 @@ export function GoogleConnect({ gatewayId, orgFetch }: { gatewayId: string; orgF
         <div className="mt-2">
           <p className="text-[11px] mb-2" style={muted}>
             Approve access in the Google tab. It then ends on a page that won’t load
-            (“This site can’t be reached”, address starting with <code>http://127.0.0.1</code>).
+            (“This site can’t be reached”, address starting with <code>{singleAccount ? 'http://localhost' : 'http://127.0.0.1'}</code>).
             That is expected: copy that tab’s full address and paste it here, then close the tab.
           </p>
           <p className="sm:hidden text-[11px] mb-2" style={muted}>
@@ -221,7 +226,7 @@ export function GoogleConnect({ gatewayId, orgFetch }: { gatewayId: string; orgF
               value={redirect}
               onChange={(e) => setRedirect(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter' && redirect.trim()) void finish(); }}
-              placeholder="http://127.0.0.1:…/oauth2/callback?state=…&code=…"
+              placeholder={singleAccount ? 'http://localhost:1/?state=…&code=…' : 'http://127.0.0.1:…/oauth2/callback?state=…&code=…'}
               className="basis-full sm:basis-auto flex-1 min-w-0 px-2 py-2 sm:py-1.5 text-xs font-mono rounded-md"
               style={input}
             />

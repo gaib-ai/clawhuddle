@@ -29,12 +29,22 @@ import {
   effectiveGatewayLimit,
   findGatewayRow,
   listMemberGateways,
+  orgAllowsHermes,
   listOrgGateways,
   setGatewayState,
   summarizeGateway,
   type GatewayRow,
 } from '../../services/gateway-store.js';
-import { PROVIDER_IDS, MODEL_IDS, USAGE_RANGES, type CreateGatewayRequest, type UpdateGatewayRequest } from '@clawhuddle/shared';
+import {
+  PROVIDER_IDS,
+  MODEL_IDS,
+  USAGE_RANGES,
+  isGatewayRuntime,
+  type CreateGatewayRequest,
+  type GatewayAccess,
+  type GatewayRuntime,
+  type UpdateGatewayRequest,
+} from '@clawhuddle/shared';
 import { getGatewayUsage, getUsageSnapshot, isUsageSnapshotRunning, takeUsageSnapshot } from '../../services/usage.js';
 
 declare module 'fastify' {
@@ -54,6 +64,23 @@ function labelProblem(label: unknown): string | null {
   if (label.length > MAX_LABEL_LENGTH) return `Label must be at most ${MAX_LABEL_LENGTH} characters`;
   if (/[\u0000-\u001f\u007f]/.test(label)) return 'Label must be a single line of text';
   return null;
+}
+
+/**
+ * The runtime a create request asks for (default OpenClaw), or the reply to
+ * send instead: an unknown value, or Hermes in an org that has not turned it on.
+ */
+function runtimeFor(orgId: string, value: unknown, reply: FastifyReply): GatewayRuntime | null {
+  if (value === undefined || value === null) return 'openclaw';
+  if (!isGatewayRuntime(value)) {
+    reply.status(400).send({ error: 'validation', message: `Unknown runtime: ${String(value)}` });
+    return null;
+  }
+  if (value === 'hermes' && !orgAllowsHermes(orgId)) {
+    reply.status(403).send({ error: 'runtime_disabled', message: 'Hermes instances are not enabled for this organization' });
+    return null;
+  }
+  return value;
 }
 
 function maskToken(token: string): string {
@@ -166,8 +193,10 @@ export async function orgGatewayRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const labelError = labelProblem(request.body?.label);
       if (labelError) return reply.status(400).send({ error: 'validation', message: labelError });
+      const runtime = runtimeFor(request.orgId!, request.body?.runtime, reply);
+      if (!runtime) return reply;
       try {
-        const result = await createGateway(request.orgId!, request.orgMember!.id, { label: request.body?.label?.trim() || null });
+        const result = await createGateway(request.orgId!, request.orgMember!.id, { label: request.body?.label?.trim() || null, runtime });
         return reply.status(201).send({ data: result });
       } catch (err: any) {
         return sendGatewayError(reply, err);
@@ -194,8 +223,10 @@ export async function orgGatewayRoutes(app: FastifyInstance) {
       }
       const labelError = labelProblem(request.body?.label);
       if (labelError) return reply.status(400).send({ error: 'validation', message: labelError });
+      const runtime = runtimeFor(orgId, request.body?.runtime, reply);
+      if (!runtime) return reply;
       try {
-        const result = await createGateway(orgId, memberId, { label: request.body?.label?.trim() || null });
+        const result = await createGateway(orgId, memberId, { label: request.body?.label?.trim() || null, runtime });
         return reply.status(201).send({ data: result });
       } catch (err: any) {
         return sendGatewayError(reply, err);
@@ -311,13 +342,15 @@ export async function orgGatewayRoutes(app: FastifyInstance) {
         'admin opened member gateway',
       );
       reply.header('Cache-Control', 'no-store');
-      return {
-        data: {
-          gateway_token: g.token,
-          gateway_subdomain: g.subdomain,
-          gateway_port: g.port,
-        },
+      const data: GatewayAccess = {
+        runtime: g.runtime,
+        gateway_token: g.token,
+        gateway_subdomain: g.subdomain,
+        gateway_port: g.port,
       };
+      // A Hermes dashboard has a sign-in page: the token is its password, this the name.
+      if (g.runtime === 'hermes') data.dashboard_username = g.subdomain;
+      return { data };
     },
   );
 
@@ -406,6 +439,13 @@ export async function orgGatewayRoutes(app: FastifyInstance) {
       if (!code || !code.trim()) {
         return reply.status(400).send({ error: 'validation', message: 'Pairing code is required' });
       }
+      if (!CHANNELS.includes(channel)) {
+        return reply.status(400).send({ error: 'validation', message: `Invalid channel: ${channel}` });
+      }
+      // The code ends up as an argument of a CLI run in the instance.
+      if (!/^[A-Za-z0-9-]{4,32}$/.test(code.trim())) {
+        return reply.status(400).send({ error: 'validation', message: 'That does not look like a pairing code' });
+      }
       try {
         const output = await approvePairing(request.orgId!, request.gateway!.id, channel, code.trim());
         return { data: { channel, approved: true, output } };
@@ -420,6 +460,9 @@ export async function orgGatewayRoutes(app: FastifyInstance) {
     own,
     async (request, reply) => {
       const { channel } = request.params;
+      if (!CHANNELS.includes(channel)) {
+        return reply.status(400).send({ error: 'validation', message: `Invalid channel: ${channel}` });
+      }
       try {
         const output = await listPairingRequests(request.orgId!, request.gateway!.id, channel);
         return { data: { channel, output } };
