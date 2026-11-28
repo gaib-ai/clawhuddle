@@ -33,7 +33,8 @@ import {
   type GatewayRow,
 } from "./gateway-store.js";
 import type { DevicePairingRequest, DeviceRequestList, SecretInjectionState, Skill } from "@clawhuddle/shared";
-import { PROVIDERS } from "@clawhuddle/shared";
+import { PROVIDERS, normalizeBrowserPairCode } from "@clawhuddle/shared";
+import { PAIRING_CHECK_CMD, parsePairingCheck, toBrowserPairRequest, type PairingCheck } from "./pairing-check.js";
 
 import {
   GATEWAY_DOMAIN,
@@ -1618,40 +1619,44 @@ function assertRequestId(requestId: string): void {
   if (!DEVICE_REQUEST_ID.test(requestId)) throw new Error("Invalid request id");
 }
 
-/** Read `clawhuddle-pending-devices` output; null unless it is a plain count. */
-export function parsePendingCount(output: string): number | null {
-  const text = output.trim();
-  return /^\d+$/.test(text) ? Number(text) : null;
-}
-
 /**
- * The cheap pending check (docker/gateway/pending-devices.cjs). Null means
- * unknown: the check failed, or the instance predates it and has not been
- * redeployed yet (exec exits 127).
+ * One cheap look at what is waiting on an instance (services/pairing-check.ts).
+ * Every part is null when it could not be read: the check failed, timed out or
+ * printed something else.
  */
-async function pendingDeviceCount(containerName: string): Promise<number | null> {
+async function pairingCheck(containerName: string): Promise<PairingCheck> {
   try {
-    return parsePendingCount(await execInContainer(containerName, ["clawhuddle-pending-devices"]));
+    return parsePairingCheck(await execInContainer(containerName, PAIRING_CHECK_CMD));
   } catch {
-    return null;
+    return { pending: null, browser: null };
   }
 }
 
 /**
- * Browsers/devices waiting to be approved into an instance's Control UI. The
- * entrypoint auto-approves within seconds where its loop is running (see
- * docker/gateway/entrypoint.sh), so this is usually empty, and the sidebar polls
- * it from every open tab: the CLI, which costs ~4.5 CPU-seconds, runs only when
- * the cheap check does not say 0. A stopped instance simply has none.
+ * Browsers/devices waiting to be approved into an instance's Control UI, of two kinds.
+ *
+ * Device requests come from a client that already holds the instance's token.
+ * The entrypoint auto-approves them within seconds where its loop is running
+ * (see docker/gateway/entrypoint.sh), so there are usually none, and the
+ * sidebar polls this from every open tab: the CLI, which costs ~4.5
+ * CPU-seconds, runs only when the cheap check does not say 0.
+ *
+ * Browser-code requests (`kind: 'browser-code'`) come from a browser without
+ * the token that chose "Pair this browser" on the sign-in page. Nothing
+ * approves those by itself; they are listed without their code.
+ *
+ * A stopped instance simply has none.
  */
 export async function listDeviceRequests(orgId: string, gatewayId: string): Promise<DevicePairingRequest[]> {
   const g = getGatewayRow(orgId, gatewayId);
   // Hermes has no device pairing: its dashboard is behind the instance's own sign-in.
   if (g.status !== "running" || g.runtime === "hermes") return [];
   const container = containerNameFor(g);
-  if ((await pendingDeviceCount(container)) === 0) return [];
+  const check = await pairingCheck(container);
+  const browsers = (check.browser ?? []).map(toBrowserPairRequest);
+  if (check.pending === 0) return browsers;
   const output = await execInContainer(container, ["openclaw", "devices", "list", "--json"]);
-  return parseDeviceRequests(output);
+  return [...browsers, ...parseDeviceRequests(output)];
 }
 
 export async function approveDeviceRequest(orgId: string, gatewayId: string, requestId: string): Promise<void> {
@@ -1664,6 +1669,68 @@ export async function rejectDeviceRequest(orgId: string, gatewayId: string, requ
   assertRequestId(requestId);
   const g = requireOpenClaw(requireRunning(orgId, gatewayId));
   await execInContainer(containerNameFor(g), ["openclaw", "devices", "reject", requestId, "--json"]);
+}
+
+/** What OpenClaw answered when it refused a `gateway call`: its own sentence, not the JSON around it. */
+function gatewayCallRefusal(err: unknown): string {
+  const text = err instanceof Error ? err.message : String(err);
+  const start = text.indexOf("{");
+  if (start >= 0) {
+    try {
+      const message = JSON.parse(text.slice(start))?.error?.message;
+      if (typeof message === "string" && message) return message;
+    } catch {
+      // not JSON after all
+    }
+  }
+  return text;
+}
+
+const sameCode = (a: string, b: string) =>
+  a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+
+/**
+ * Answer a browser that is showing a pairing code. Approving makes that browser
+ * an administrator of the instance, and all it has proven is that it can reach
+ * the sign-in page, so an approval must carry the code: only someone looking at
+ * that browser knows it. A rejection needs none. The decision goes through the
+ * running gateway (`device.pair.code`, what `openclaw pair` calls), bound to
+ * the request id so it cannot land on another browser. Returns the paired
+ * device id on approval.
+ */
+export async function decideBrowserPair(
+  orgId: string,
+  gatewayId: string,
+  requestId: string,
+  decision: "approve" | "reject",
+  typedCode?: string,
+): Promise<{ deviceId?: string }> {
+  assertRequestId(requestId);
+  const g = requireOpenClaw(requireRunning(orgId, gatewayId));
+  const container = containerNameFor(g);
+  const row = (await pairingCheck(container)).browser?.find((r) => r.requestId === requestId);
+  if (!row) throw new Error("This browser is no longer waiting. Its code expired or was already answered.");
+  if (decision === "approve") {
+    const code = normalizeBrowserPairCode(typedCode ?? "");
+    if (!code) throw new Error("Enter the 8-character code that browser is showing, for example ABCD-EFGH.");
+    if (!sameCode(code, row.code)) throw new Error("That is not the code this browser is showing.");
+  }
+  let stdout: string;
+  try {
+    stdout = await execInContainer(
+      container,
+      [
+        "openclaw", "gateway", "call", "device.pair.code", "--json", "--timeout", "10000",
+        "--params", JSON.stringify({ code: row.code, requestId, decision }),
+      ],
+      30_000,
+    );
+  } catch (err) {
+    throw new Error(gatewayCallRefusal(err));
+  }
+  const start = stdout.indexOf("{");
+  const answer = start >= 0 ? (JSON.parse(stdout.slice(start)) as { deviceId?: unknown }) : {};
+  return decision === "approve" && typeof answer.deviceId === "string" ? { deviceId: answer.deviceId } : {};
 }
 
 /**

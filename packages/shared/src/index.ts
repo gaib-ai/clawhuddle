@@ -241,6 +241,25 @@ export interface DevicePairingRequest {
   isRepair?: boolean;
   /** Requested at, epoch ms. */
   ts: number;
+  /**
+   * `browser-code`: a browser on the instance's sign-in page that chose "Pair
+   * this browser" and is showing a code (OpenClaw 2026.11+). It has proven
+   * nothing yet, and approving makes it an administrator of the instance, so
+   * the code is never sent here: whoever approves types it from that browser.
+   * Absent for an ordinary device request (a client that already holds the
+   * instance's token).
+   */
+  kind?: 'browser-code';
+  /** Browser-code requests: the User-Agent the browser reported. */
+  userAgent?: string;
+  /** Browser-code requests: when the code stops working, epoch ms. */
+  expiresAt?: number;
+}
+
+/** Pairing codes are 8 characters from this alphabet, shown as `ABCD-EFGH`. Null when `input` is not one. */
+export function normalizeBrowserPairCode(input: string): string | null {
+  const code = String(input ?? '').replace(/[\s-]/g, '').toUpperCase();
+  return /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{8}$/.test(code) ? code : null;
 }
 
 /** A pending request together with the instance it is waiting on. */

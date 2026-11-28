@@ -15,6 +15,7 @@ import {
   listDeviceRequests,
   approveDeviceRequest,
   rejectDeviceRequest,
+  decideBrowserPair,
   collectDeviceRequests,
   syncGatewayConfig,
   getGoogleAccounts,
@@ -161,9 +162,9 @@ export async function orgGatewayRoutes(app: FastifyInstance) {
     return { data: listMemberGateways(me.id), limit, current };
   });
 
-  // Browsers waiting to be let into one of my instances' Control UI. Pairing is
-  // never approved automatically; this list (and the per-instance routes below)
-  // is how a device gets in.
+  // Browsers and devices waiting to be let into one of my instances' Control UI:
+  // device requests (which the instance's own loop usually approves first) and
+  // browsers showing a pairing code (which nothing approves by itself).
   app.get('/api/orgs/:orgId/me/device-requests', async (request) => {
     return collectDeviceRequests(listMemberGateways(request.orgMember!.id));
   });
@@ -514,6 +515,34 @@ export async function orgGatewayRoutes(app: FastifyInstance) {
         request.log.info(
           { orgId: request.orgId, gatewayId: g.id, memberId: g.member_id, requestId, by: request.orgMember!.id },
           `device pairing ${action}d`,
+        );
+        return { data: { requestId, [action === 'approve' ? 'approved' : 'rejected']: true } };
+      },
+    );
+  }
+
+  // A browser showing a pairing code on the instance's sign-in page. Approving
+  // makes it an administrator of the instance, so the approval carries the code
+  // typed from that browser (never sent by the API); a rejection needs none.
+  // Approving is a way into the instance, so it follows the rule for opening
+  // one: an admin cannot approve a browser on an owner's instance.
+  for (const action of ['approve', 'reject'] as const) {
+    app.post<GatewayParams & { Params: { requestId: string }; Body: { code?: unknown } | undefined }>(
+      `/api/orgs/:orgId/gateways/:gatewayId/browser-pairs/:requestId/${action}`,
+      action === 'approve' ? { preHandler: requireGatewayAccess({ release: true }) } : own,
+      async (request, reply) => {
+        const { requestId } = request.params;
+        const g = request.gateway!;
+        const code = typeof request.body?.code === 'string' ? request.body.code : undefined;
+        let deviceId: string | undefined;
+        try {
+          ({ deviceId } = await decideBrowserPair(request.orgId!, g.id, requestId, action, code));
+        } catch (err: any) {
+          return reply.status(400).send({ error: 'device_error', message: err.message });
+        }
+        request.log.info(
+          { orgId: request.orgId, gatewayId: g.id, memberId: g.member_id, requestId, deviceId, by: request.orgMember!.id },
+          `browser pairing ${action}d`,
         );
         return { data: { requestId, [action === 'approve' ? 'approved' : 'rejected']: true } };
       },

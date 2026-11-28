@@ -6,6 +6,7 @@ import { useOrg } from '@/lib/org-context';
 import { useOrgFetch } from '@/lib/use-org-fetch';
 import { useToast } from '@/components/ui/toast';
 import { gatewayLabel } from '@/lib/gateway-url';
+import { normalizeBrowserPairCode } from '@clawhuddle/shared';
 import type { DeviceRequestList, GatewayDeviceRequest } from '@clawhuddle/shared';
 
 const POLL_MS = 5000;
@@ -24,6 +25,96 @@ function deviceName(r: GatewayDeviceRequest): string {
   if (r.displayName) return r.displayName;
   const client = r.clientId === 'openclaw-control-ui' ? 'Control UI' : r.clientId || 'Device';
   return r.deviceFamily || r.platform ? `${client} on ${r.deviceFamily || r.platform}` : client;
+}
+
+const BROWSERS: [RegExp, string][] = [
+  [/Edg(?:e|A|iOS)?\/(\d+)/, 'Edge'],
+  [/OPR\/(\d+)/, 'Opera'],
+  [/Firefox\/(\d+)/, 'Firefox'],
+  [/HeadlessChrome\/(\d+)/, 'Headless Chrome'],
+  [/(?:Chrome|CriOS)\/(\d+)/, 'Chrome'],
+  [/Version\/(\d+)\S* .*Safari\//, 'Safari'],
+];
+const SYSTEMS: [RegExp, string][] = [
+  [/Android/, 'Android'],
+  [/iPhone|iPad|iPod/, 'iOS'],
+  [/Windows/, 'Windows'],
+  [/Macintosh|Mac OS X/, 'Mac'],
+  [/CrOS/, 'ChromeOS'],
+  [/Linux/, 'Linux'],
+];
+
+/** "Chrome 156 on Linux" from a User-Agent; the browser said it, nobody checked it. */
+function browserName(userAgent?: string): string {
+  if (!userAgent) return 'A browser';
+  let browser = 'A browser';
+  for (const [re, name] of BROWSERS) {
+    const m = userAgent.match(re);
+    if (m) { browser = `${name} ${m[1]}`; break; }
+  }
+  const system = SYSTEMS.find(([re]) => re.test(userAgent))?.[1];
+  return system ? `${browser} on ${system}` : browser;
+}
+
+const requestName = (r: GatewayDeviceRequest) => (r.kind === 'browser-code' ? browserName(r.userAgent) : deviceName(r));
+
+function expiresIn(ms: number): string {
+  const s = Math.round((ms - Date.now()) / 1000);
+  if (s <= 0) return 'expired';
+  return s < 90 ? `${s}s` : `${Math.round(s / 60)} min`;
+}
+
+/**
+ * A browser on an instance's sign-in page showing a pairing code. It has proven
+ * nothing, and approving makes it an administrator of the instance, so the page
+ * never receives the code: whoever approves reads it off that browser.
+ */
+function BrowserCodeActions({
+  busy, onApprove, onReject,
+}: {
+  busy: boolean;
+  onApprove: (code: string) => void;
+  onReject: () => void;
+}) {
+  const [typed, setTyped] = useState('');
+  const code = normalizeBrowserPairCode(typed);
+  return (
+    <form
+      className="mt-3 flex flex-col sm:flex-row gap-2"
+      onSubmit={(e) => { e.preventDefault(); if (code && !busy) onApprove(code); }}
+    >
+      <input
+        value={typed}
+        onChange={(e) => setTyped(e.target.value.toUpperCase().slice(0, 12))}
+        placeholder="ABCD-EFGH"
+        aria-label="Code shown in that browser"
+        autoComplete="off"
+        autoCapitalize="characters"
+        spellCheck={false}
+        className="sm:w-40 px-3 py-2.5 sm:py-1.5 rounded-lg text-sm font-mono tracking-widest outline-none"
+        style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
+      />
+      <div className="flex gap-2">
+        <button
+          type="submit"
+          disabled={busy || !code}
+          className="max-sm:flex-1 px-3 py-2.5 sm:py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-50"
+          style={{ background: 'var(--accent)', color: 'var(--text-inverse)' }}
+        >
+          {busy ? 'Working...' : 'Approve'}
+        </button>
+        <button
+          type="button"
+          onClick={onReject}
+          disabled={busy}
+          className="max-sm:flex-1 px-3 py-2.5 sm:py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-50"
+          style={{ background: 'var(--bg-tertiary)', color: 'var(--red)' }}
+        >
+          Reject
+        </button>
+      </div>
+    </form>
+  );
 }
 
 export default function DeviceRequestsPage() {
@@ -60,12 +151,16 @@ export default function DeviceRequestsPage() {
     return () => clearInterval(timer);
   }, [fetchRequests]);
 
-  const decide = async (r: GatewayDeviceRequest, action: 'approve' | 'reject') => {
+  const decide = async (r: GatewayDeviceRequest, action: 'approve' | 'reject', code?: string) => {
     if (!orgFetch) return;
     setBusy(r.requestId);
     try {
-      await orgFetch(`/gateways/${r.gateway.id}/devices/${encodeURIComponent(r.requestId)}/${action}`, { method: 'POST' });
-      toast(action === 'approve' ? `${deviceName(r)} approved` : `${deviceName(r)} rejected`, 'success');
+      const kind = r.kind === 'browser-code' ? 'browser-pairs' : 'devices';
+      await orgFetch(`/gateways/${r.gateway.id}/${kind}/${encodeURIComponent(r.requestId)}/${action}`, {
+        method: 'POST',
+        ...(code ? { body: JSON.stringify({ code }) } : {}),
+      });
+      toast(action === 'approve' ? `${requestName(r)} approved` : `${requestName(r)} rejected`, 'success');
       setRequests((prev) => prev.filter((x) => x.requestId !== r.requestId));
     } catch (err: any) {
       toast(err.message, 'error');
@@ -96,6 +191,7 @@ export default function DeviceRequestsPage() {
             <p className="text-xs mt-1" style={{ color: 'var(--text-tertiary)' }}>
               Each browser or device that opens an assistant for the first time has to be let in here.
               {isAdmin ? ' You see requests for every instance in the organization.' : ' Only you can approve devices for your instances.'}
+              {' '}A browser that chose “Pair this browser” on an instance’s sign-in page is listed too; approve it by typing the code it shows.
               {' '}Hermes instances are not listed: their dashboard has a sign-in instead (shown on the instance’s card on Home).
             </p>
           </div>
@@ -123,7 +219,46 @@ export default function DeviceRequestsPage() {
           </div>
         ) : (
           <div className="space-y-3">
-            {requests.map((r) => (
+            {requests.map((r) => r.kind === 'browser-code' ? (
+              <div
+                key={`${r.gateway.id}:${r.requestId}`}
+                className="rounded-xl p-4"
+                style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)' }}
+              >
+                <p className="text-sm font-medium truncate" style={{ color: 'var(--text-primary)' }}>
+                  {browserName(r.userAgent)}
+                  <span
+                    className="ml-2 text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded"
+                    style={{ background: 'var(--yellow-muted)', color: 'var(--yellow)' }}
+                  >
+                    pairing code
+                  </span>
+                </p>
+                <p className="text-xs mt-0.5" style={{ color: 'var(--text-tertiary)' }}>
+                  is showing a code to pair with <span style={{ color: 'var(--text-secondary)' }}>{gatewayLabel(r.gateway)}</span>
+                  {isAdmin && r.gateway.email && (
+                    <> of <span style={{ color: 'var(--text-secondary)' }}>{r.gateway.name || r.gateway.email}</span></>
+                  )}
+                  {' · '}{timeAgo(r.ts)}
+                </p>
+                <dl className="mt-2 grid gap-x-4 gap-y-0.5 text-xs" style={{ gridTemplateColumns: 'max-content 1fr', color: 'var(--text-tertiary)' }}>
+                  {r.remoteIp && (<><dt>From</dt><dd style={{ color: 'var(--text-secondary)' }}>{r.remoteIp}</dd></>)}
+                  {r.browserOrigin && (<><dt>Page</dt><dd className="truncate" style={{ color: 'var(--text-secondary)' }}>{r.browserOrigin}</dd></>)}
+                  <dt>Browser ID</dt><dd className="font-mono" title={r.deviceId}>{r.deviceId.slice(0, 8)}</dd>
+                  {r.expiresAt ? (<><dt>Code expires</dt><dd style={{ color: 'var(--text-secondary)' }}>{expiresIn(r.expiresAt)}</dd></>) : null}
+                </dl>
+                <p className="text-xs mt-3" style={{ color: 'var(--text-secondary)' }}>
+                  Approving gives this browser full administrator access to the instance. Anyone who can reach the sign-in page can ask,
+                  and the browser name and page above are only what it reported. Approve only a browser you opened yourself,
+                  by typing the code it is showing.
+                </p>
+                <BrowserCodeActions
+                  busy={busy === r.requestId}
+                  onApprove={(code) => decide(r, 'approve', code)}
+                  onReject={() => decide(r, 'reject')}
+                />
+              </div>
+            ) : (
               <div
                 key={`${r.gateway.id}:${r.requestId}`}
                 className="rounded-xl p-4"

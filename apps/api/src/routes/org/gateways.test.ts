@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
@@ -23,8 +23,10 @@ const docker = vi.hoisted(() => ({
   execs: [] as string[][],
   /** What `openclaw devices list --json` prints inside the stub container. */
   devicesJson: '{"pending":[],"paired":[]}',
-  /** stdout and exit code of `clawhuddle-pending-devices`; empty means unknown. */
+  /** stdout and exit code of the pairing check (`node -e …`); anything but its JSON means unknown. */
   pendingCheck: { stdout: '', exitCode: 0 },
+  /** stdout and exit code of `openclaw gateway call device.pair.code`. */
+  pairCall: { stdout: '{}', exitCode: 0 },
   /** stdout for `sh -c <script>` execs, picked by a substring of the script. */
   shOutputs: {} as Record<string, string>,
   /** Throwaway containers (created with an Entrypoint): their config, and what running one does. */
@@ -75,13 +77,15 @@ vi.mock('dockerode', () => {
       docker.execUsers.push(opts.User);
       const helper = opts.Cmd[1] === '/opt/clawhuddle/helper.py' ? docker.helper[opts.Cmd[2]] : undefined;
       const isList = opts.Cmd.slice(0, 3).join(' ') === 'openclaw devices list';
-      const isCheck = opts.Cmd[0] === 'clawhuddle-pending-devices';
+      const isCheck = opts.Cmd[0] === 'node' && opts.Cmd.includes('-e');
+      const isPairCall = opts.Cmd.slice(0, 4).join(' ') === 'openclaw gateway call device.pair.code';
       const sh = opts.Cmd[0] === 'sh'
         ? Object.entries(docker.shOutputs).find(([k]) => opts.Cmd[2]?.includes(k))?.[1]
         : undefined;
       const chunks = isList
         ? [frame(2, 'warn: something on stderr\n'), frame(1, docker.devicesJson.slice(0, 10)), frame(1, docker.devicesJson.slice(10))]
         : isCheck ? [frame(1, docker.pendingCheck.stdout)]
+        : isPairCall ? [frame(1, docker.pairCall.stdout)]
         : sh !== undefined ? [frame(1, sh)]
         : helper !== undefined ? [frame(1, helper)] : [];
       return {
@@ -92,7 +96,7 @@ vi.mock('dockerode', () => {
             if (event === 'end') setTimeout(cb, 0);
           },
         }),
-        inspect: async () => ({ ExitCode: isCheck ? docker.pendingCheck.exitCode : 0 }),
+        inspect: async () => ({ ExitCode: isCheck ? docker.pendingCheck.exitCode : isPairCall ? docker.pairCall.exitCode : 0 }),
       };
     }
   }
@@ -704,24 +708,143 @@ describe('device pairing', () => {
     afterAll(() => { docker.devicesJson = '{"pending":[],"paired":[]}'; });
 
     it('skips the CLI when nothing is waiting', async () => {
-      docker.pendingCheck = { stdout: '0\n', exitCode: 0 };
+      docker.pendingCheck = { stdout: '{"pending":0,"browser":[]}\n', exitCode: 0 };
       expect(await list()).toEqual({ requests: [], ranCli: false });
     });
 
     it('asks the CLI once something is waiting', async () => {
-      docker.pendingCheck = { stdout: '1\n', exitCode: 0 };
+      docker.pendingCheck = { stdout: '{"pending":1,"browser":[]}\n', exitCode: 0 };
       expect(await list()).toEqual({ requests: [PENDING.requestId], ranCli: true });
     });
 
     // A request must never disappear because the check could not answer.
     it.each([
-      ['an instance on an older image', { stdout: 'exec: not found\n', exitCode: 127 }],
+      ['a check that cannot run', { stdout: 'exec: not found\n', exitCode: 127 }],
       ['a check that fails', { stdout: '', exitCode: 1 }],
-      ['output that is not a count', { stdout: 'warn: 0\n', exitCode: 0 }],
+      ['output that is not the check\'s answer', { stdout: 'warn: 0\n', exitCode: 0 }],
+      ['a count it could not read', { stdout: '{"pending":null,"browser":[]}\n', exitCode: 0 }],
+      ['a count that is not a number', { stdout: '{"pending":"0","browser":[]}\n', exitCode: 0 }],
       ['no output', { stdout: '', exitCode: 0 }],
     ])('falls back to the CLI for %s', async (_case, check) => {
       docker.pendingCheck = check;
       expect(await list()).toEqual({ requests: [PENDING.requestId], ranCli: true });
+    });
+  });
+
+  describe('a browser showing a pairing code', () => {
+    const BROWSER = {
+      requestId: '5af53965-0043-476d-ae6f-81f3d1f7bf4b',
+      code: '93WY836P',
+      deviceId: '06283ca6e92a29d7f5794ef39a27c203cd019d6d4ce6c4707b75e817f448f550',
+      remoteIp: '198.51.100.7',
+      userAgent: 'Mozilla/5.0 (X11; Linux x86_64) Chrome/156.0.0.0 Safari/537.36',
+      origin: 'https://claw-abc.example.com',
+      createdAtMs: 1795857087922,
+      expiresAtMs: 1795857687922,
+    };
+    const waiting = (pending: number | null = 0) =>
+      ({ stdout: `${JSON.stringify({ pending, browser: [BROWSER] })}\n`, exitCode: 0 });
+    const decide = async (by: { id: string }, action: 'approve' | 'reject', payload?: object, instance = membersInstance, requestId = BROWSER.requestId) =>
+      app.inject({
+        method: 'POST', url: `/api/orgs/${ORG}/gateways/${instance}/browser-pairs/${requestId}/${action}`,
+        headers: await as(by), ...(payload ? { payload } : {}),
+      });
+    const pairCalls = () => docker.execs.filter((c) => c[3] === 'device.pair.code').map((c) => JSON.parse(c[c.indexOf('--params') + 1]));
+
+    beforeEach(() => {
+      docker.execs.length = 0;
+      docker.pendingCheck = waiting();
+      docker.pairCall = { stdout: JSON.stringify({ status: 'approved', requestId: BROWSER.requestId, deviceId: BROWSER.deviceId }), exitCode: 0 };
+    });
+    afterAll(() => {
+      docker.pendingCheck = { stdout: '', exitCode: 0 };
+      docker.pairCall = { stdout: '{}', exitCode: 0 };
+      docker.devicesJson = '{"pending":[],"paired":[]}';
+    });
+
+    it('is listed without its code, and without running the CLI when no device is waiting', async () => {
+      const res = await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/me/device-requests`, headers: await as(MEMBER) });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().data).toEqual([{
+        kind: 'browser-code',
+        requestId: BROWSER.requestId,
+        deviceId: BROWSER.deviceId,
+        userAgent: BROWSER.userAgent,
+        remoteIp: BROWSER.remoteIp,
+        browserOrigin: BROWSER.origin,
+        ts: BROWSER.createdAtMs,
+        expiresAt: BROWSER.expiresAtMs,
+        gateway: expect.objectContaining({ id: membersInstance }),
+      }]);
+      expect(res.body).not.toContain(BROWSER.code);
+      expect(docker.execs.some((c) => c[0] === 'openclaw')).toBe(false);
+    });
+
+    it('is listed next to the device requests', async () => {
+      docker.pendingCheck = waiting(1);
+      docker.devicesJson = JSON.stringify({ pending: [PENDING], paired: [] });
+      const res = await app.inject({ method: 'GET', url: `/api/orgs/${ORG}/gateways/${membersInstance}/devices`, headers: await as(MEMBER) });
+      expect(res.json().data.map((r: any) => [r.kind, r.requestId])).toEqual([
+        ['browser-code', BROWSER.requestId],
+        [undefined, PENDING.requestId],
+      ]);
+    });
+
+    it('is approved only with the code it shows, typed as the browser prints it', async () => {
+      for (const payload of [undefined, {}, { code: '' }, { code: 'ABCD' }, { code: 12345678 }]) {
+        const res = await decide(MEMBER, 'approve', payload);
+        expect(res.statusCode).toBe(400);
+        expect(res.json().message).toMatch(/8-character code/);
+      }
+      const wrong = await decide(MEMBER, 'approve', { code: '93WY-836Q' });
+      expect(wrong.statusCode).toBe(400);
+      expect(wrong.json().message).toMatch(/not the code/);
+      expect(wrong.body).not.toContain(BROWSER.code);
+      expect(pairCalls()).toEqual([]);
+
+      const ok = await decide(MEMBER, 'approve', { code: ' 93wy-836p ' });
+      expect(ok.statusCode).toBe(200);
+      expect(ok.json().data).toEqual({ requestId: BROWSER.requestId, approved: true });
+      expect(pairCalls()).toEqual([{ code: BROWSER.code, requestId: BROWSER.requestId, decision: 'approve' }]);
+    });
+
+    it('is rejected without a code', async () => {
+      const res = await decide(MEMBER, 'reject');
+      expect(res.statusCode).toBe(200);
+      expect(res.json().data).toEqual({ requestId: BROWSER.requestId, rejected: true });
+      expect(pairCalls()).toEqual([{ code: BROWSER.code, requestId: BROWSER.requestId, decision: 'reject' }]);
+    });
+
+    it('cannot be answered once it is gone, or under an id that is not one', async () => {
+      const gone = await decide(MEMBER, 'approve', { code: BROWSER.code }, membersInstance, '11111111-2222-3333-4444-555555555555');
+      expect(gone.statusCode).toBe(400);
+      expect(gone.json().message).toMatch(/no longer waiting/);
+      const bad = await decide(MEMBER, 'reject', undefined, membersInstance, encodeURIComponent('x; rm -rf /'));
+      expect(bad.statusCode).toBe(400);
+      docker.pendingCheck = { stdout: '', exitCode: 1 };
+      expect((await decide(MEMBER, 'approve', { code: BROWSER.code })).statusCode).toBe(400);
+      expect(pairCalls()).toEqual([]);
+    });
+
+    it("passes on OpenClaw's own reason when it refuses", async () => {
+      docker.pairCall = {
+        stdout: JSON.stringify({ ok: false, error: { code: 'INVALID_REQUEST', message: 'This code has expired. Choose Pair this browser again to get a new one.' } }),
+        exitCode: 1,
+      };
+      const res = await decide(MEMBER, 'approve', { code: BROWSER.code });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().message).toBe('This code has expired. Choose Pair this browser again to get a new one.');
+    });
+
+    it("is approved by the instance's member or whoever may open the instance, nobody else", async () => {
+      expect((await decide(OTHER, 'approve', { code: BROWSER.code })).statusCode).toBe(403);
+      expect((await decide(OTHER, 'reject')).statusCode).toBe(403);
+      expect((await decide(ADMIN, 'approve', { code: BROWSER.code })).statusCode).toBe(200);
+
+      // An admin cannot open an owner's instance, so cannot let a browser into it either.
+      const ownersInstance = (await mine(OWNER)).data[0].id;
+      expect((await decide(ADMIN, 'approve', { code: BROWSER.code }, ownersInstance)).statusCode).toBe(403);
+      expect((await decide(OWNER, 'approve', { code: BROWSER.code }, ownersInstance)).statusCode).toBe(200);
     });
   });
 
