@@ -1488,23 +1488,6 @@ export async function removeGateway(orgId: string, gatewayId: string) {
   return { id: g.id, member_id: g.member_id, user_id: g.user_id, slot: g.slot, removed: true };
 }
 
-export async function redeployAllGateways(orgId: string) {
-  const results: { gatewayId: string; memberId: string; slot: number; status: string | null }[] = [];
-  const errors: { gatewayId: string; memberId: string; slot: number; error: string }[] = [];
-
-  for (const g of listOrgGateways(orgId)) {
-    try {
-      const result = await deployGateway(orgId, g.id);
-      results.push({ gatewayId: g.id, memberId: g.member_id, slot: g.slot, status: result.status });
-    } catch (err: any) {
-      console.error(`Failed to redeploy gateway ${refLabel(g)}:`, err.message);
-      errors.push({ gatewayId: g.id, memberId: g.member_id, slot: g.slot, error: err.message });
-    }
-  }
-
-  return { results, errors };
-}
-
 /**
  * Redeploys the instances a member currently has up, after something every
  * instance consumes changed (skills). Failures are logged, not raised: the

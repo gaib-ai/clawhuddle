@@ -9,7 +9,8 @@ import { useConfirm } from '@/components/ui/confirm-dialog';
 import { MemberApiKeysModal } from './member-api-keys-modal';
 import { gatewayUrl, gatewayLabel, gatewayLogin, type GatewayAccess } from '@/lib/gateway-url';
 import { GatewayLogin } from '@/components/gateway-login';
-import { runtimeLabel, type GatewayRuntime, type GatewaySummary, type OrgMember } from '@clawhuddle/shared';
+import { RedeployAllButton, RedeployAllStatus, useRedeployAll } from './redeploy-all';
+import { RUNTIMES, runtimeLabel, type GatewayRuntime, type GatewaySummary, type OrgMember } from '@clawhuddle/shared';
 
 function Badge({ color, children }: { color: 'green' | 'red' | 'yellow' | 'blue' | 'purple' | 'gray'; children: React.ReactNode }) {
   const styles: Record<string, { bg: string; text: string }> = {
@@ -51,6 +52,86 @@ function ActionBtn({ onClick, color = 'default', children }: { onClick: () => vo
   );
 }
 
+/**
+ * "+ New instance" with a pull-down to pick the runtime. The menu is placed
+ * with fixed coordinates: the table clips anything that overflows it.
+ */
+function NewInstanceMenu({ label, onPick }: { label: string; onPick: (runtime: GatewayRuntime) => void }) {
+  const [at, setAt] = useState<{ top: number; left: number } | null>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!at) return;
+    const close = () => setAt(null);
+    const outside = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (!button.current?.contains(t) && !menu.current?.contains(t)) close();
+    };
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
+    document.addEventListener('mousedown', outside);
+    document.addEventListener('keydown', key);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      document.removeEventListener('mousedown', outside);
+      document.removeEventListener('keydown', key);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [at]);
+
+  const toggle = () => {
+    if (at) return setAt(null);
+    const r = button.current!.getBoundingClientRect();
+    const height = RUNTIMES.length * 36 + 8;
+    // Below the button, or above it when there is no room left on the screen.
+    const top = r.bottom + 4 + height > window.innerHeight ? r.top - 4 - height : r.bottom + 4;
+    setAt({ top, left: Math.max(8, Math.min(r.left, window.innerWidth - 184)) });
+  };
+
+  return (
+    <>
+      <button
+        ref={button}
+        onClick={toggle}
+        aria-haspopup="menu"
+        aria-expanded={!!at}
+        className="text-xs font-medium transition-colors"
+        style={{ color: 'var(--accent)' }}
+        onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--accent-hover)'; }}
+        onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--accent)'; }}
+      >
+        {label} ▾
+      </button>
+      {at && (
+        <div
+          ref={menu}
+          role="menu"
+          aria-label="Agent runtime"
+          className="fixed w-44 rounded-lg py-1 z-50 shadow-lg"
+          style={{ top: at.top, left: at.left, background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)' }}
+        >
+          {RUNTIMES.map((r) => (
+            <button
+              key={r.id}
+              role="menuitem"
+              title={r.description}
+              onClick={() => { setAt(null); onPick(r.id); }}
+              className="w-full h-9 px-3 text-left text-xs transition-colors"
+              style={{ color: 'var(--text-primary)' }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
+            >
+              {r.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
 interface Props {
   initialMembers: OrgMember[];
 }
@@ -74,7 +155,6 @@ export function MemberTable({ initialMembers }: Props) {
   const [gatewayLimitHit, setGatewayLimitHit] = useState<{ member: OrgMember; limit: number } | null>(null);
   // keyed by gateway id, or by member id while a new instance is being created
   const [loadingGateway, setLoadingGateway] = useState<string | null>(null);
-  const [redeployingAll, setRedeployingAll] = useState(false);
   const [apiKeysMember, setApiKeysMember] = useState<OrgMember | null>(null);
 
   const orgFetch = useCallback(
@@ -239,28 +319,7 @@ export function MemberTable({ initialMembers }: Props) {
     }
   };
 
-  const hasDeployedGateway = members.some((m) => (m.gateways ?? []).length > 0);
-
-  const redeployAll = async () => {
-    setRedeployingAll(true);
-    try {
-      const res = await orgFetch<{ data: { results: any[]; errors: any[] } }>(
-        '/gateways/redeploy-all',
-        { method: 'POST' },
-      );
-      const { results, errors } = res.data;
-      if (errors.length > 0) {
-        toast(`Redeployed ${results.length}, failed ${errors.length}`, 'error');
-      } else {
-        toast(`Redeploying ${results.length} gateway${results.length === 1 ? '' : 's'}`, 'success');
-      }
-      await refresh();
-    } catch (err: any) {
-      toast(err.message, 'error');
-    } finally {
-      setRedeployingAll(false);
-    }
-  };
+  const redeployAll = useRedeployAll(members, orgFetch, !isMaintainer, refresh);
 
   // Same rule as role changes: owners can open any gateway, admins any but an
   // owner's, maintainers only plain members'. The API enforces it; this only
@@ -396,9 +455,10 @@ export function MemberTable({ initialMembers }: Props) {
           )
         ) : (
           <span className="flex items-center gap-2">
-            <ActionBtn onClick={() => deployNew(member)}>{list.length === 0 ? 'Deploy' : '+ New instance'}</ActionBtn>
-            {hermesEnabled && (
-              <ActionBtn onClick={() => deployNew(member, 'hermes')}>{list.length === 0 ? 'Deploy Hermes' : '+ Hermes'}</ActionBtn>
+            {hermesEnabled ? (
+              <NewInstanceMenu label={list.length === 0 ? 'Deploy' : '+ New instance'} onPick={(runtime) => deployNew(member, runtime)} />
+            ) : (
+              <ActionBtn onClick={() => deployNew(member)}>{list.length === 0 ? 'Deploy' : '+ New instance'}</ActionBtn>
             )}
             {list.length > 0 && (
               <span className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>{list.length}/{max}</span>
@@ -448,23 +508,11 @@ export function MemberTable({ initialMembers }: Props) {
         <span className="text-xs tabular-nums" style={{ color: 'var(--text-tertiary)' }}>
           {members.length} members
         </span>
-        {hasDeployedGateway && (
-          <button
-            onClick={redeployAll}
-            disabled={redeployingAll}
-            className="ml-auto px-3 py-2.5 sm:py-2 rounded-lg text-xs font-medium transition-all disabled:opacity-50"
-            style={{
-              background: 'var(--bg-tertiary)',
-              color: 'var(--text-secondary)',
-            }}
-            onMouseEnter={(e) => { if (!redeployingAll) e.currentTarget.style.background = 'var(--bg-hover)'; }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--bg-tertiary)'; }}
-          >
-            {redeployingAll ? 'Redeploying...' : 'Redeploy All Gateways'}
-          </button>
-        )}
+        <RedeployAllButton redeploy={redeployAll} />
       </div>
       )}
+
+      <RedeployAllStatus redeploy={redeployAll} />
 
       {/* Member limit banner */}
       {limitHit && (

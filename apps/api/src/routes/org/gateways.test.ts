@@ -41,6 +41,8 @@ const docker = vi.hoisted(() => ({
   execUsers: [] as (string | undefined)[],
   /** stdout of the Hermes image's helper, by its command (`usage`, `google-start`, …). */
   helper: {} as Record<string, string>,
+  /** While set, creating an instance container waits for it (holds a redeploy mid-way). */
+  gate: null as Promise<void> | null,
 }));
 vi.mock('dockerode', () => {
   // A docker exec stream without a TTY is framed: type byte, 3 zero bytes,
@@ -99,6 +101,7 @@ vi.mock('dockerode', () => {
     async createNetwork() {}
     getContainer(name: string) { return new Container(name); }
     async createContainer(cfg: { name: string; Entrypoint?: string[] }) {
+      if (docker.gate && !cfg.Entrypoint) await docker.gate;
       if (cfg.Entrypoint) docker.offline.push(cfg);
       else {
         docker.created.push(cfg.name);
@@ -109,6 +112,20 @@ vi.mock('dockerode', () => {
     async listContainers() { return []; }
   }
   return { default: Docker };
+});
+
+// The real "Redeploy all" run, polling every millisecond instead of every 5 s.
+const redeploy = vi.hoisted(() => ({ done: Promise.resolve() as Promise<void> }));
+vi.mock('../../services/redeploy-all.js', async (original) => {
+  const real = await original<typeof import('../../services/redeploy-all.js')>();
+  return {
+    ...real,
+    startRedeployAll: (orgId: string, runtime: 'openclaw' | 'hermes' | null) => {
+      const started = real.startRedeployAll(orgId, runtime, { pollMs: 1 });
+      redeploy.done = started.done;
+      return started;
+    },
+  };
 });
 
 const SECRET = 'test-secret-'.padEnd(48, 'x');
@@ -1016,6 +1033,7 @@ describe('maintainers', () => {
     expect((await req(MAINT, 'DELETE', `/members/${om(PLAIN)}`)).statusCode).toBe(403);
     expect((await req(MAINT, 'GET', '/gateways')).statusCode).toBe(403);
     expect((await req(MAINT, 'POST', '/gateways/redeploy-all')).statusCode).toBe(403);
+    expect((await req(MAINT, 'GET', '/gateways/redeploy-all')).statusCode).toBe(403);
     expect((await req(MAINT, 'GET', '/device-requests')).statusCode).toBe(403);
     expect((await req(MAINT, 'GET', '/api-keys')).statusCode).toBe(403);
   });
@@ -1117,6 +1135,35 @@ describe('Hermes instances', () => {
     expect(docker.execUsers[0]).toBe('hermes');
     // No OpenClaw follow-up (secret store, device check) on a Hermes instance.
     expect(docker.execs.flat().join(' ')).not.toContain('openclaw');
+  });
+
+  it('are redeployed on their own by "Redeploy all Hermes", in the background', async () => {
+    expect((await req(ADMIN, 'GET', '/gateways/redeploy-all')).json().data).toBeNull();
+    expect((await req(ADMIN, 'POST', '/gateways/redeploy-all', { runtime: 'skynet' })).statusCode).toBe(400);
+    expect((await req(MEMBER, 'POST', '/gateways/redeploy-all', { runtime: 'hermes' })).statusCode).toBe(403);
+    expect((await req(MEMBER, 'GET', '/gateways/redeploy-all')).statusCode).toBe(403);
+
+    const g = await row();
+    const before = docker.created.length;
+    let release = () => {};
+    docker.gate = new Promise<void>((resolve) => { release = resolve; });
+    const res = await req(ADMIN, 'POST', '/gateways/redeploy-all', { runtime: 'hermes' });
+    expect(res.statusCode).toBe(202);
+    expect(res.json().data).toMatchObject({ runtime: 'hermes', concurrency: 2, finishedAt: null });
+    expect(res.json().data.items.map((i: any) => i.gatewayId)).toEqual([g.id]);
+    // A second click while it runs starts nothing.
+    const again = await req(ADMIN, 'POST', '/gateways/redeploy-all', {});
+    expect(again.statusCode).toBe(409);
+    expect(again.json().error).toBe('redeploy_in_progress');
+
+    docker.gate = null;
+    release();
+    await redeploy.done;
+    const run = (await req(ADMIN, 'GET', '/gateways/redeploy-all')).json().data;
+    expect(run.finishedAt).not.toBeNull();
+    expect(run.items).toMatchObject([{ gatewayId: g.id, runtime: 'hermes', state: 'done' }]);
+    // Only the Hermes container was created again; no OpenClaw instance was touched.
+    expect(docker.created.slice(before)).toEqual([NAME]);
   });
 
   it('hand an admin the sign-in instead of a token link', async () => {

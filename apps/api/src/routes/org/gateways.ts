@@ -8,7 +8,6 @@ import {
   startGateway,
   restartGateway,
   removeGateway,
-  redeployAllGateways,
   getGatewayStatus,
   getOrgContainerIds,
   approvePairing,
@@ -45,6 +44,7 @@ import {
   type GatewayRuntime,
   type UpdateGatewayRequest,
 } from '@clawhuddle/shared';
+import { RedeployInProgressError, getRedeployAll, startRedeployAll } from '../../services/redeploy-all.js';
 import { getGatewayUsage, getUsageSnapshot, isUsageSnapshotRunning, takeUsageSnapshot } from '../../services/usage.js';
 
 declare module 'fastify' {
@@ -234,17 +234,33 @@ export async function orgGatewayRoutes(app: FastifyInstance) {
     },
   );
 
-  // Redeploy every instance in the org
-  app.post<{ Params: { orgId: string } }>(
+  // Redeploy every instance in the org, or every instance of one runtime. A
+  // background run, a few at a time (services/redeploy-all.ts); GET follows it.
+  app.post<{ Params: { orgId: string }; Body: { runtime?: string | null } | undefined }>(
     '/api/orgs/:orgId/gateways/redeploy-all',
     { preHandler: requireRole('owner', 'admin') },
     async (request, reply) => {
+      const runtime = request.body?.runtime ?? null;
+      if (runtime !== null && !isGatewayRuntime(runtime)) {
+        return reply.status(400).send({ error: 'validation', message: 'runtime must be openclaw or hermes' });
+      }
       try {
-        return { data: await redeployAllGateways(request.params.orgId) };
+        const { run } = startRedeployAll(request.params.orgId, runtime);
+        request.log.info({ orgId: request.params.orgId, runtime, instances: run.items.length, by: request.currentUser!.id }, 'redeploy all started');
+        return reply.status(202).send({ data: run });
       } catch (err: any) {
+        if (err instanceof RedeployInProgressError) {
+          return reply.status(409).send({ error: 'redeploy_in_progress', message: err.message, data: err.run });
+        }
         return sendGatewayError(reply, err);
       }
     },
+  );
+
+  app.get<{ Params: { orgId: string } }>(
+    '/api/orgs/:orgId/gateways/redeploy-all',
+    { preHandler: requireRole('owner', 'admin') },
+    async (request) => ({ data: getRedeployAll(request.params.orgId) }),
   );
 
   // --- per-instance routes: own instance, or admin+ ---------------------------

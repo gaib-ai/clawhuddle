@@ -375,19 +375,8 @@ export function AppSidebar({
           Sign out
         </button>
 
-        {/* Sponsor + User info */}
-        <div className="px-3 pt-2 space-y-2">
-          <a
-            href="https://buymeacoffee.com/unless"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-1.5 text-[11px] transition-colors"
-            style={{ color: 'var(--text-tertiary)' }}
-            onMouseEnter={(e) => { e.currentTarget.style.color = '#ffdd00'; }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-tertiary)'; }}
-          >
-            ☕ Buy me a coffee
-          </a>
+        {/* User info */}
+        <div className="px-3 pt-2">
           <p className="text-[11px] truncate" style={{ color: 'var(--text-tertiary)' }}>
             {session?.user?.email}
           </p>

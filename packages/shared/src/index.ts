@@ -114,6 +114,36 @@ export function runtimeLabel(runtime: GatewayRuntime | null | undefined): string
 }
 
 /**
+ * One instance in a "Redeploy all" run (Admin → Members). `skipped` is either
+ * an instance that was stopped when its turn came (`stopped`: it is left
+ * stopped) or one the run never reached because it was halted (`halted`).
+ */
+export interface RedeployAllItem {
+  gatewayId: string;
+  memberId: string;
+  slot: number;
+  runtime: GatewayRuntime;
+  state: 'queued' | 'deploying' | 'done' | 'failed' | 'skipped';
+  reason?: 'stopped' | 'halted';
+  error?: string;
+}
+
+/** A "Redeploy all" run: a few instances at a time, each waited for until it is running again. */
+export interface RedeployAllRun {
+  id: string;
+  /** Only instances of this runtime; null = every instance. */
+  runtime: GatewayRuntime | null;
+  /** How many instances are redeployed at the same time. */
+  concurrency: number;
+  startedAt: string;
+  /** Null while the run is going. */
+  finishedAt: string | null;
+  /** The run stopped early because instances kept failing. */
+  halted: boolean;
+  items: RedeployAllItem[];
+}
+
+/**
  * One-click sign-in page for an instance whose web UI has a sign-in page
  * (Hermes). Served by the API on the instance's own host; the web app opens it
  * as `<instance>/_clawhuddle/open#u=<username>&p=<password>`.
